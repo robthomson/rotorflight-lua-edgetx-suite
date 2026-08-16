@@ -1,0 +1,43 @@
+name: Create rfsuite-lua-edgetx ZIP on PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  create-zip:
+    name: Build PR ZIP (${{ matrix.lang }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # keep in sync with push.yml / release.yml / snapshot.yml
+        lang: [en, de]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set build variables (PR version)
+        run: |
+          PR_NUMBER='${{ github.event.pull_request.number }}'
+          echo "GIT_VER=PR-${PR_NUMBER}" >> $GITHUB_ENV
+
+      - name: Create rfsuite-radio-install-v${{ env.GIT_VER }}_${{ matrix.lang }}.zip
+        run: |
+          python bin/package/build_package.py \
+            --lang '${{ matrix.lang }}' \
+            --artifact-version '${{ env.GIT_VER }}' \
+            --output-dir .
+
+      - name: Upload per-locale ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: rfsuite-radio-install-v${{ env.GIT_VER }}_${{ matrix.lang }}
+          path: rfsuite-radio-install-v${{ env.GIT_VER }}_${{ matrix.lang }}.zip
+          if-no-files-found: error

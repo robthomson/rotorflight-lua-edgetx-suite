@@ -1,8 +1,4 @@
-# Changelog
-
-All notable changes to the RFSuite project since 2026-07-29.
-
-## [0.1.0] - 2026-08-16
+# 0.1.0
 
 ### Features
 - **Telemetry Flight Logs & Dashboard (`diagnostics/flight_logs`)**:
@@ -30,7 +26,7 @@ All notable changes to the RFSuite project since 2026-07-29.
 - **Telemetry CSV Parsing Accuracy**: Improved header validation, outlier filtering (e.g. 0 RPM spikes), and memory efficiency during log analysis.
 - **Reconnect Performance**: Resolved telemetry reconnect slowdowns and memory buildup using proactive garbage collection and cached LQ checks.
 
-## [0.0.2] - 2026-08-14
+# 0.0.2
 
 ### Features
 - **Compile-time Translation Inlining**: Introduced static translation inlining at compile time, simplified settings, and bumped version to 0.0.2.

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-Multi-language Radio Install ZIP builder for Rotorflight EdgeTX Suite.
-Used in GitHub Actions CI and local release packaging.
+Per-locale Radio Install ZIP builder for Rotorflight EdgeTX Suite.
+Used in GitHub Actions CI (pr/push/release/snapshot workflows) and local
+packaging via package.cmd / package.sh.
 """
 
+import argparse
 import os
 import sys
 import shutil
@@ -105,7 +107,7 @@ def copy_audio_pack(lang, src_audio, dst_audio):
             shutil.copytree(src_sub, dst_sub, dirs_exist_ok=True)
 
 
-def build_package_for_language(lang, version, output_dir):
+def build_package_for_language(lang, version, output_dir, artifact_name=None):
     temp_dir = tempfile.mkdtemp(prefix="rfsuite_build_")
     try:
         src_root = os.path.join(WORKSPACE_ROOT, "src")
@@ -175,7 +177,8 @@ def build_package_for_language(lang, version, output_dir):
             subprocess.run([sys.executable, py_resolve, "--json", lang_file, "--root", staging_widgets], check=True)
 
         # Create output ZIP
-        zip_filename = f"rfsuite-radio-install-v{version}_{lang}.zip"
+        os.makedirs(output_dir, exist_ok=True)
+        zip_filename = artifact_name or f"rfsuite-radio-install-v{version}_{lang}.zip"
         zip_path = os.path.join(output_dir, zip_filename)
         if os.path.isfile(zip_path):
             os.remove(zip_path)
@@ -189,26 +192,34 @@ def build_package_for_language(lang, version, output_dir):
                     rel_p = os.path.relpath(full_p, temp_dir)
                     zf.write(full_p, rel_p)
 
-        print(f"Created ZIP: {zip_path}")
+        print(f"[package] Created {zip_path}")
+        return zip_path
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--lang", required=True, help="Locale to package (e.g. en, de)")
+    p.add_argument("--artifact-version", default=None, help="Version string baked into the default zip filename (defaults to version.lua)")
+    p.add_argument("--artifact-name", default=None, help="Output zip filename (defaults to rfsuite-radio-install-v<version>_<lang>.zip)")
+    p.add_argument("--output-dir", default="dist", help="Directory to write the finished zip into (default: dist)")
+    return p.parse_args()
+
+
 def main():
-    version = get_suite_version()
-    languages = get_available_languages()
-    output_dir = os.path.join(WORKSPACE_ROOT, "dist")
-    os.makedirs(output_dir, exist_ok=True)
+    args = parse_args()
+    lang = args.lang
+    version = args.artifact_version or get_suite_version()
+    output_dir = os.path.abspath(args.output_dir)
 
-    print(f"Building RFSuite Radio ZIP packages for version v{version}")
-    print(f"Languages: {', '.join(languages)}")
+    available = get_available_languages()
+    if lang not in available:
+        print(f"[package] WARNING: '{lang}' not found under src/rfsuite/i18n (available: {', '.join(available)}); continuing anyway.")
 
-    for lang in languages:
-        print(f"\n--- Building language: {lang} ---")
-        build_package_for_language(lang, version, output_dir)
-
-    print(f"\nAll radio ZIP packages successfully built in {output_dir}")
+    print(f"Building RFSuite Radio ZIP package for version v{version}, locale '{lang}'")
+    build_package_for_language(lang, version, output_dir, artifact_name=args.artifact_name)
 
 
 if __name__ == "__main__":
