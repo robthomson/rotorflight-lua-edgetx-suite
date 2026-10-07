@@ -11,19 +11,30 @@ local waitingLogged = false
 local function apiVersionReady(v)
   return v ~= nil and v ~= "" and tostring(v) ~= "0"
 end
+local MspRuntime = nil
 
 local function loadModule(path)
   local fullPath = "/SCRIPTS/TOOLS/rfsuite-core/" .. path
-  local chunk = loadScript(fullPath, "t")
+  local mode = (_G.rfsuite and _G.rfsuite.loadMode) or "bt"
+  local chunk = loadScript(fullPath, mode)
   if type(chunk) ~= "function" then return nil end
   local ok, mod = pcall(chunk)
   if not ok then return nil end
   return mod
 end
 
+-- The logger and the MSP runtime are one instance per Lua state. The runner drops this module when
+-- its task completes and loads it again the next time the event fires, so a bare loadScript here
+-- would read and compile those files again every time; lib/require.lua hands back the loaded one.
+local function loadShared(path)
+  local req = _G.rfsuite and _G.rfsuite.require
+  if type(req) == "function" then return req(path) end
+  return loadModule(path)
+end
+
 function M.wakeup()
   if Log == nil then
-    Log = loadModule("lib/log.lua") or false
+    Log = loadShared("lib/log.lua") or false
   end
   if ApiVersion == nil then
     ApiVersion = loadModule("lib/api_version.lua") or false
@@ -41,7 +52,7 @@ function M.wakeup()
   if not apiVersionReady(session.apiVersion) then
     done = true
     if (not waitingLogged) and type(Log) == "table" and type(Log.emit) == "function" then
-      pcall(Log.emit, "rfsuite.tasks.smartfuel", "skip smartfuel_config (api unknown)", "debug", true)
+      pcall(Log.emit, "rfsuite.tasks.smartfuel", "skip smartfuel_config (api unknown)", "debug")
       waitingLogged = true
     end
     return
@@ -52,7 +63,7 @@ function M.wakeup()
   if not (ApiVersion and ApiVersion.isAtLeast and ApiVersion.isAtLeast(apiVersion, { 12, 0, 9 })) then
     done = true
     if type(Log) == "table" and type(Log.emit) == "function" then
-      pcall(Log.emit, "rfsuite.tasks.smartfuel", "skip smartfuel_config (api=" .. tostring(session.apiVersion) .. " < 12.0.9)", "debug", true)
+      pcall(Log.emit, "rfsuite.tasks.smartfuel", "skip smartfuel_config (api=" .. tostring(session.apiVersion) .. " < 12.0.9)", "debug")
     end
     return
   end
@@ -62,7 +73,10 @@ function M.wakeup()
   if not smartfuelConfigApi then
     smartfuelConfigApi = loadModule("tasks/msp/api/smartfuel_config.lua")
   end
-  local msp = loadModule("tasks/msp/runtime.lua")
+  if MspRuntime == nil then
+    MspRuntime = loadShared("tasks/msp/runtime.lua") or false
+  end
+  local msp = MspRuntime or nil
   if not msp or not smartfuelConfigApi then
     done = true
     return
@@ -78,20 +92,30 @@ function M.wakeup()
     command = smartfuelConfigApi.command,
     simulatorResponse = smartfuelConfigApi.simulatorResponse,
     timeout = 5.0,
+    -- Bounded below the task timeout in tasks/events/common/runner.lua, so this read
+    -- is given up by the queue before the runner re-queues the task that owns it.
+    maxRetries = 2,
     processReply = function(self, buf)
       local data = smartfuelConfigApi.parse(buf)
       if type(data) == "table" then
-        session.smartfuel_config = data.parsed or data
+        session.smartfuel_config = data
       end
       done = true
       if type(Log) == "table" and type(Log.emit) == "function" then
-        pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config received", "debug", true)
+        pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config received", "debug")
       end
     end,
-    errorHandler = function()
+    errorHandler = function(msg, reason)
+      -- "cleared" is the queue dropping this request, not the flight controller refusing it:
+      -- nothing was sent, so the request is still owed. Leaving the task incomplete with its latch
+      -- open is what lets the runner ask for it again on a later pass.
+      if reason == "cleared" then
+        requestSent = false
+        return
+      end
       done = true
       if type(Log) == "table" and type(Log.emit) == "function" then
-        pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config read failed", "warn", true)
+        pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config read failed", "warn")
       end
     end
   })

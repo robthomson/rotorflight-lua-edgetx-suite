@@ -51,22 +51,32 @@ local RFMD_MAP = {
   [102] = { mode = "X150", band = "900MHz" }
 }
 
-local ROW_KEYS = {
-  "version",
-  "edgetx_version",
-  "rf_version",
-  "fc_version",
-  "fbl_uid",
-  "variant",
-  "board_info",
-  "build_info",
-  "rf_mode",
-  "rf_band",
-  "packet_rate",
-  "msp_version",
-  "msp_transport",
-  "supported_versions",
-  "simulation"
+-- The prefix every key on this page hangs under. It is spelled out here rather than built
+-- inside the lookup, because .vscode/scripts/precompile_i18n.py reads it off this assignment
+-- and uses it to resolve the calls below at package time -- which is the only time this tree
+-- can be localised, since a packaged install carries i18n/init.lua and no locale table.
+local keyPrefix = "app.pages.diagnostics_info"
+
+-- One row per line of the page: the value to look up, the key its label lives under, and the
+-- English label. The label was previously looked up under a key held in a variable, so the
+-- packager could not see it and the lookup stayed a runtime one -- which on a packaged card
+-- resolves to nothing. `labelKey`/`labelFallback` is the shape the packager does rewrite.
+local ROWS = {
+  { key = "version",            labelKey = "version",            labelFallback = "Version" },
+  { key = "edgetx_version",     labelKey = "edgetx_version",     labelFallback = "EdgeTX Version" },
+  { key = "rf_version",         labelKey = "rf_version",         labelFallback = "Rotorflight Version" },
+  { key = "fc_version",         labelKey = "fc_version",         labelFallback = "FC Version" },
+  { key = "fbl_uid",            labelKey = "fbl_uid",            labelFallback = "FBL Serial" },
+  { key = "variant",            labelKey = "variant",            labelFallback = "Variant" },
+  { key = "board_info",         labelKey = "board_info",         labelFallback = "Board Info" },
+  { key = "build_info",         labelKey = "build_info",         labelFallback = "Build Info" },
+  { key = "rf_mode",            labelKey = "rf_mode",            labelFallback = "RF Mode" },
+  { key = "rf_band",            labelKey = "rf_band",            labelFallback = "RF Band" },
+  { key = "packet_rate",        labelKey = "packet_rate",        labelFallback = "Packet Ratio" },
+  { key = "msp_version",        labelKey = "msp_version",        labelFallback = "MSP Version" },
+  { key = "msp_transport",      labelKey = "msp_transport",      labelFallback = "MSP Transport" },
+  { key = "supported_versions", labelKey = "supported_versions", labelFallback = "Supported MSP API" },
+  { key = "simulation",         labelKey = "simulation",         labelFallback = "Simulation" }
 }
 
 local state = {
@@ -80,7 +90,12 @@ local state = {
   loadingStartedAt = 0,
   loadingTimeoutSec = 12,
   refreshIntervalSec = 45,
-  packetRateRefreshSec = 1.2,
+  -- Packet Ratio is crsf_telemetry_link_ratio out of MSP_TELEMETRY_CONFIG: a stored setting,
+  -- which the firmware reads once when it sets up CRSF telemetry at boot, not a statistic of
+  -- the live link. Nothing in the suite can write it while this page is open, so the re-read
+  -- below only exists to pick up a change made by another client, such as a configurator on
+  -- USB, and it does that at the page's refresh interval rather than once a second.
+  packetRateRefreshSec = 45,
   lastFetchAt = 0,
   lastPacketRateFetchAt = 0,
   packetRateRequestPending = false,
@@ -90,6 +105,7 @@ local state = {
   errorMessage = nil,
   errorDialogShown = nil,
   rebuild = nil,
+  i18n = nil,
   values = {
     fc_version = nil,
     rf_version = nil,
@@ -115,13 +131,17 @@ end
 local function isFblConnected()
   ensureCoreDeps()
   local runtimeState = MspRuntime and MspRuntime.getState and MspRuntime.getState() or nil
-  if type(runtimeState) ~= "table" then
-    return false
+  if type(runtimeState) == "table" then
+    if runtimeState.isSimulator == true or runtimeState.lastConnected == true then
+      return true
+    end
   end
-  if runtimeState.isSimulator == true then
+  local root = type(_G) == "table" and _G.rfsuite or nil
+  local session = root and root.session
+  if type(session) == "table" and session.isConnected == true then
     return true
   end
-  return runtimeState.lastConnected == true
+  return false
 end
 
 local function ensureLiveDeps()
@@ -145,7 +165,11 @@ end
 
 local function t(i18n, key, fallback)
   if i18n and i18n.t then
-    return i18n.t("app.pages.diagnostics_info." .. key)
+    local full = keyPrefix .. "." .. key
+    local val = i18n.t(full, fallback)
+    if val ~= nil and val ~= full then
+      return val
+    end
   end
   return fallback
 end
@@ -229,14 +253,41 @@ local function formatPacketRate(value)
   return packetRateCacheText
 end
 
-local function readLiveRfInfo()
-  if type(getValue) ~= "function" then
-    return "-", "-"
+-- RFMD_MAP has an entry for 0, and getValue() answers integer 0 both for a name the model has no
+-- sensor for and for a sensor the radio has stopped receiving. Either state therefore came out of
+-- this function as a confident "25Hz / 900Mhz" -- on a page a pilot typically opens because
+-- something is wrong. getSourceValue() answers nothing for the first state, and its second return
+-- value is false for the second, so neither reaches the map.
+local function readLiveRfmd(name)
+  local getSrcV = _G.getSourceValue
+  if type(getSrcV) == "function" then
+    local ok, value, live = pcall(getSrcV, name)
+    if ok and type(value) == "number" and live ~= false then
+      return value
+    end
+    return nil
   end
 
+  -- Without getSourceValue the existence half is still reachable through getFieldInfo, which
+  -- resolves against the model's own sensor table.
+  if type(getFieldInfo) ~= "function" or type(getValue) ~= "function" then
+    return nil
+  end
+  local okInfo, info = pcall(getFieldInfo, name)
+  if not (okInfo and type(info) == "table" and info.id ~= nil) then
+    return nil
+  end
+  local okValue, value = pcall(getValue, name)
+  if okValue and type(value) == "number" then
+    return value
+  end
+  return nil
+end
+
+local function readLiveRfInfo()
   for i = 1, #RFMD_SENSOR_CANDIDATES do
-    local ok, value = pcall(getValue, RFMD_SENSOR_CANDIDATES[i])
-    if ok and type(value) == "number" then
+    local value = readLiveRfmd(RFMD_SENSOR_CANDIDATES[i])
+    if value ~= nil then
       local rfmd = math.floor(value + 0.5)
       local info = RFMD_MAP[rfmd]
       if info then
@@ -325,7 +376,13 @@ local function markStepDone()
 end
 
 local function abortLoading(i18n, reason)
-  AsyncLoadUi.fail(state, i18n, t, reason)
+  if AsyncLoadUi and type(AsyncLoadUi.fail) == "function" then
+    AsyncLoadUi.fail(state, i18n or state.i18n, t, reason)
+  else
+    state.loading = false
+    state.showLoadingOverlay = false
+    state.errorMessage = tostring(reason or "Loading failed")
+  end
   requestRebuild()
 end
 
@@ -376,13 +433,16 @@ local function startLiveLoad()
 
   local function onFailure(name, cmd)
     local runtimeMsg = readRuntimeErrorMessage()
-    local details = runtimeMsg or (tostring(name or "MSP") .. " failed (cmd=" .. tostring(cmd or "?") .. ")")
-    abortLoading(nil, details)
+    local details = runtimeMsg or (tostring(name or "MSP") .. " timed out / failed (cmd=" .. tostring(cmd or "?") .. ")")
+    abortLoading(state.i18n, details)
   end
 
   queue:add({
+    client = "info-page",
     command = VariantApi.command,
     simulatorResponse = VariantApi.simulatorResponse,
+    retryDelay = 1.2,
+    timeout = 3.5,
     processReply = function(_, buf)
       local parsed = VariantApi.parse(buf)
       if parsed and parsed.variant and parsed.variant ~= "" then
@@ -394,17 +454,20 @@ local function startLiveLoad()
   })
 
   queue:add({
+    client = "info-page",
     command = BoardInfoApi.command,
     simulatorResponse = BoardInfoApi.simulatorResponse,
-    retryDelay = 1.6,
-    timeout = 4.0,
+    retryDelay = 1.2,
+    timeout = 3.5,
     processReply = function(_, buf)
       local parsed = BoardInfoApi.parse(buf)
       if parsed then
-        if parsed.boardName and parsed.boardName ~= "" then
-          state.values.board_info = parsed.boardName
-        else
-          state.values.board_info = string.format("ID %d", tonumber(parsed.boardId) or 0)
+        -- The names are the ones the parser sets. They used to be read as boardName/boardId,
+        -- which it never returned, so this line showed the fallback whatever the board said.
+        if parsed.board_name and parsed.board_name ~= "" then
+          state.values.board_info = parsed.board_name
+        elseif parsed.board_identifier and parsed.board_identifier ~= "" then
+          state.values.board_info = parsed.board_identifier
         end
       end
       markStepDone()
@@ -413,10 +476,11 @@ local function startLiveLoad()
   })
 
   queue:add({
+    client = "info-page",
     command = BuildInfoApi.command,
     simulatorResponse = BuildInfoApi.simulatorResponse,
-    retryDelay = 1.6,
-    timeout = 4.0,
+    retryDelay = 1.2,
+    timeout = 3.5,
     processReply = function(_, buf)
       local parsed = BuildInfoApi.parse(buf)
       if parsed and parsed.buildInfo and parsed.buildInfo ~= "" then
@@ -427,11 +491,15 @@ local function startLiveLoad()
     errorHandler = function() onFailure("BUILD_INFO", BuildInfoApi.command) end
   })
 
+  -- The re-read counts its interval from this read. Left at 0, it would ask for the same
+  -- message again on the first wakeup after the load had finished.
+  state.lastPacketRateFetchAt = now
   queue:add({
+    client = "info-page",
     command = TelemetryConfigApi.command,
     simulatorResponse = TelemetryConfigApi.simulatorResponse,
-    retryDelay = 1.6,
-    timeout = 4.0,
+    retryDelay = 1.2,
+    timeout = 3.5,
     processReply = function(_, buf)
       local parsed = TelemetryConfigApi.parse(buf)
       if parsed then
@@ -465,7 +533,9 @@ local function pollPacketRateLive()
     state.packetRateRequestPending = false
     return
   end
-  if state.loading then
+  -- The page's own load reads the value first. Until it has started, the timestamp is still 0
+  -- and a re-read here would only send the message the load is about to send.
+  if state.loading or not state.started then
     return
   end
 
@@ -473,7 +543,7 @@ local function pollPacketRateLive()
   if state.packetRateRequestPending then
     return
   end
-  if (now - (state.lastPacketRateFetchAt or 0)) < (state.packetRateRefreshSec or 1.2) then
+  if (now - (state.lastPacketRateFetchAt or 0)) < (state.packetRateRefreshSec or 45) then
     return
   end
 
@@ -489,19 +559,23 @@ local function pollPacketRateLive()
   state.lastPacketRateFetchAt = now
 
   queue:add({
+    client = "info-page",
     command = TelemetryConfigApi.command,
     simulatorResponse = TelemetryConfigApi.simulatorResponse,
     retryDelay = 1.2,
     timeout = 3.0,
     processReply = function(_, buf)
       local parsed = TelemetryConfigApi.parse(buf)
+      local newRate = "-"
       if parsed then
-        state.values.packet_rate = formatPacketRate(parsed.crsf_telemetry_link_ratio)
-      else
-        state.values.packet_rate = "-"
+        newRate = formatPacketRate(parsed.crsf_telemetry_link_ratio)
       end
+      local changed = (state.values.packet_rate ~= newRate)
+      state.values.packet_rate = newRate
       state.packetRateRequestPending = false
-      requestRebuild()
+      if changed then
+        requestRebuild()
+      end
     end,
     errorHandler = function()
       state.packetRateRequestPending = false
@@ -509,16 +583,13 @@ local function pollPacketRateLive()
   })
 end
 
-function M.getModuleTitle()
-  return "Info"
-end
-
 function M.getHeaderActions()
-  return { reload = isFblConnected(), save = false, help = true }
+  return { reload = true, save = false, help = true }
 end
 
 function M.onReload()
   if not isFblConnected() then
+    abortLoading(state.i18n, t(state.i18n, "not_connected", "Telemetry / FBL not connected"))
     return false
   end
   queueLiveLoad(true)
@@ -537,6 +608,7 @@ function M.build(ctx)
   local h = ctx.h
   local i18n = ctx.i18n
 
+  state.i18n = i18n
   state.rebuild = ctx.requestRebuild
   if not isFblConnected() then
     state.pendingStart = false
@@ -555,8 +627,6 @@ function M.build(ctx)
     startLiveLoad()
   end
 
-  pollPacketRateLive()
-
   local values = buildInfoValues()
   local rowY = y + 6
   local rowH = 44
@@ -564,10 +634,11 @@ function M.build(ctx)
   local valueX = x + labelW
   local valueW = w - labelW
 
-  for i = 1, #ROW_KEYS do
-    local key = ROW_KEYS[i]
+  for i = 1, #ROWS do
+    local row = ROWS[i]
+    local key = row.key
     local thisY = rowY + (i - 1) * rowH
-    local labelText = t(i18n, key, key)
+    local labelText = t(i18n, row.labelKey, row.labelFallback)
     local valueText = values[key] or "-"
 
     children[#children + 1] = {
@@ -603,8 +674,8 @@ function M.build(ctx)
   end
 
   if state.loading and state.showLoadingOverlay then
-    if AsyncLoadUi.isTimedOut(state, nowSeconds()) then
-      abortLoading(i18n, readRuntimeErrorMessage() or t(i18n, "loading_timeout", "Timeout"))
+    if AsyncLoadUi and AsyncLoadUi.isTimedOut(state, nowSeconds()) then
+      abortLoading(i18n, readRuntimeErrorMessage() or t(i18n, "loading_timeout", "Timeout while reading from FBL"))
     end
     local title = t(i18n, "loading_title", "Loading")
     local message = string.format("%s %d/%d", t(i18n, "loading_message", "Reading live data"), state.done, state.total)
@@ -618,11 +689,37 @@ function M.build(ctx)
       progress = state.progress
     })
   elseif state.errorMessage and state.errorMessage ~= "" then
-    AsyncLoadUi.showErrorDialog(state, i18n, t)
+    AsyncLoadUi.appendErrorNotice(children, {
+      x = x,
+      y = y,
+      w = w,
+      h = h,
+      overlay = LoadingOverlay,
+      requestRebuild = state.rebuild
+    }, state, i18n, t)
   end
 end
 
 function M.wakeup()
+  local now = nowSeconds()
+  if state.loading then
+    if not isFblConnected() then
+      abortLoading(state.i18n, t(state.i18n, "link_lost", "Telemetry link lost"))
+      return
+    end
+    if AsyncLoadUi and type(AsyncLoadUi.isTimedOut) == "function" and AsyncLoadUi.isTimedOut(state, now) then
+      abortLoading(state.i18n, readRuntimeErrorMessage() or t(state.i18n, "loading_timeout", "Timeout while reading from FBL"))
+      return
+    end
+  else
+    local connected = isFblConnected()
+    if connected and not state.started and not state.pendingStart then
+      queueLiveLoad(false)
+      return
+    end
+  end
+
+  pollPacketRateLive()
 end
 
 function M.paint()
@@ -640,7 +737,7 @@ function M.closePage()
   local runtimeState = MspRuntime and type(MspRuntime.getState) == "function" and MspRuntime.getState() or nil
   local queue = runtimeState and runtimeState.queue
   if queue and type(queue.clear) == "function" then
-    queue:clear()
+    queue:clear("info-page")
   end
   state.started = false
   state.attached = false
@@ -649,7 +746,23 @@ function M.closePage()
   state.forceReload = false
   state.packetRateRequestPending = false
   state.lastPacketRateFetchAt = 0
-  AsyncLoadUi.reset(state)
+  state.i18n = nil
+
+  -- The page module is held in a small LRU, so this state outlives the page. Everything read
+  -- over MSP is the flight controller's, and the next visit may be a different flight
+  -- controller: leaving the values and the fetch timestamp behind let the cache gate above
+  -- take its early return and draw the previous board for the rest of the refresh interval,
+  -- with nothing on screen saying the values were not read. Dropping both is what makes the
+  -- next visit read again; the rows fall back to "-" on their own, at the point where they
+  -- are rendered.
+  state.lastFetchAt = 0
+  state.values = {}
+  packetRateCacheKey = nil
+  packetRateCacheText = "-"
+
+  if AsyncLoadUi and type(AsyncLoadUi.reset) == "function" then
+    AsyncLoadUi.reset(state)
+  end
   state.rebuild = nil
 
   VariantApi = nil

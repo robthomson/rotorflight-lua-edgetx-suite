@@ -28,7 +28,7 @@ function Header.tAction(i18n, key, fallback)
 end
 
 -- Resolve which header actions are visible/enabled.
--- ctx: { headerActions, menu, i18n, preferences, PageRegistry, HelpRegistry }
+-- ctx: { headerActions, menu, i18n, preferences, PageRegistry, HelpRegistry, reportHookCrash }
 function Header.resolveActions(ctx)
   local headerActions = ctx.headerActions
   local menu          = ctx.menu
@@ -60,11 +60,20 @@ function Header.resolveActions(ctx)
 
       local pageModule = PageRegistry and PageRegistry.byMenuId and PageRegistry.byMenuId[menuId] or nil
       if pageModule and pageModule.getHeaderActions then
-        local fromPage = pageModule.getHeaderActions({
+        -- This runs on every scene rebuild for whatever page is open, so a raise in it ends the
+        -- tool without anybody having touched a control. Guarded, the page simply keeps the
+        -- action set resolved above it.
+        local okPage, fromPage = pcall(pageModule.getHeaderActions, {
           i18n        = ctx.i18n,
           preferences = ctx.preferences,
           menu        = menu
         })
+        if not okPage then
+          if type(ctx.reportHookCrash) == "function" then
+            ctx.reportHookCrash("activePage.getHeaderActions", menuId, fromPage)
+          end
+          fromPage = nil
+        end
         if type(fromPage) == "table" then
           if fromPage.save   ~= nil then actions.save   = fromPage.save   == true end
           if fromPage.reload ~= nil then actions.reload = fromPage.reload == true end
@@ -126,8 +135,10 @@ function Header.appendToLayout(lyt, ctx)
   local xBack   = xSave    - cfg.topButtonGap - cfg.topButtonWAction
   local general = type(prefs) == "table" and prefs.general or nil
   local showRamLabel = type(general) == "table" and general.show_header_memory == true
+  local xLeftmost = xBack
   if showRamLabel then
     local xMem = xBack - cfg.topButtonGap - cfg.memW
+    xLeftmost = xMem
     lyt[#lyt + 1] = {
       type  = "label",
       x = xMem, y = cfg.topButtonY + cfg.memYOffset, w = cfg.memW,
@@ -141,6 +152,23 @@ function Header.appendToLayout(lyt, ctx)
   appendButton(lyt, cfg, xReload, cfg.topButtonWAction, t("reload", "RELOAD"), actions.reload, ctx.onReload)
   appendButton(lyt, cfg, xStar,   cfg.topButtonWSmall,  t("star",   "*"),      actions.star,   ctx.onStar)
   appendButton(lyt, cfg, xHelp,   cfg.topButtonWSmall,  t("help",   "?"),      actions.help,   ctx.onHelp)
+
+  -- The connection status button, at the left end of the row and on every screen the header is
+  -- on. It is the one control here that reports rather than acts, and the state it reports
+  -- matters on a page as much as on the menu -- a save that is refused because the flight
+  -- controller stopped answering is read on the page it was refused on.
+  --
+  -- Its glyph is handed in as a FUNCTION, so the firmware resolves it on its own refresh pass
+  -- and the state can change without anything rebuilding the scene. It is always pressable:
+  -- there is no state in which "what is the connection doing" is not a question with an answer.
+  --
+  -- Appended AFTER the five buttons above although it is drawn left of them: LVGL puts objects
+  -- into the focus group in creation order, so this keeps Back the first stop of the rotary,
+  -- as it was before the button existed.
+  if type(ctx.connectionGlyph) == "function" then
+    local xStatus = xLeftmost - cfg.topButtonGap - cfg.topButtonWSmall
+    appendButton(lyt, cfg, xStatus, cfg.topButtonWSmall, ctx.connectionGlyph, true, ctx.onConnectionStatus)
+  end
 end
 
 return Header

@@ -6,31 +6,15 @@ local APPID_SMARTCONSUMPTION = 0x5FE0
 local SENSOR_NAME_SMARTFUEL = "SmFt"
 local SENSOR_NAME_SMARTCONSUMPTION = "SmCp"
 local FORCE_REFRESH_INTERVAL = 2.0
-local RESERVE_MIN = 15
-local RESERVE_MAX = 60
-local RESERVE_DEFAULT = 35
-
-local MIRROR_FUEL_QUERIES = {
-  { category = CATEGORY_TELEMETRY_SENSOR, appId = 0x5007 },
-  { category = CATEGORY_TELEMETRY_SENSOR, appId = 0x0600 },
-  { category = CATEGORY_TELEMETRY_SENSOR, appId = 0x1014 }
-}
-
-local MIRROR_CONSUMPTION_QUERIES = {
-  { category = CATEGORY_TELEMETRY_SENSOR, appId = 0x5008 },
-  { category = CATEGORY_TELEMETRY_SENSOR, appId = 0x5250 },
-  { category = CATEGORY_TELEMETRY_SENSOR, appId = 0x1013 }
-}
 
 local Sensors = nil
 local MspRuntime = nil
 local Log = nil
 local ApiVersion = nil
+local Reserve = nil
 
-local initialized = false
 local lastWake = 0
 local wakeInterval = 1.0
-local dischargeCurveTable = nil
 
 local state = {
   batterySignature = nil,
@@ -50,8 +34,24 @@ local state = {
   lastFirmwareFuelMissingLog = 0
 }
 
+-- Every module this file loads is a shared library, and the rest of the Lua state -- the
+-- dashboard, the flight record -- takes it through lib/require.lua. A bare loadScript here
+-- compiled a second copy of each one, and for lib/sensors.lua that copy kept a path cache, miss
+-- records and a search throttle of its own, which the Sensors.reset() at the link edges never
+-- reached. Only a table is taken from the memoizer: it stores `true` for a module that returned
+-- nothing, and every slot below is indexed as a table. A load that fails prints
+-- lib/require.lua's own line; an answer that is not a table is taken as absent without one, and
+-- none of the five modules below returns anything else. Every shipped host sets
+-- `rfsuite.require` before its event runners start, so the bare load below is a fallback only.
 local function loadModule(path)
-  local chunk = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. path, "t")
+  local req = _G.rfsuite and _G.rfsuite.require
+  if type(req) == "function" then
+    local mod = req(path)
+    if type(mod) == "table" then return mod end
+    return nil
+  end
+  local mode = (_G.rfsuite and _G.rfsuite.loadMode) or "bt"
+  local chunk = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. path, mode)
   if type(chunk) ~= "function" then return nil end
   local ok, mod = pcall(chunk)
   if not ok then return nil end
@@ -70,7 +70,7 @@ end
 local function logSmart(msg, level)
   if not Log then return end
   if type(Log.emit) == "function" then
-    pcall(Log.emit, "rfsuite.smart", tostring(msg), level or "debug", true)
+    pcall(Log.emit, "rfsuite.smart", tostring(msg), level or "debug")
   end
 end
 
@@ -109,17 +109,26 @@ local function resetComputedState()
   resetVoltageTracking()
 end
 
-local function ensureCurve()
-  if dischargeCurveTable then return end
-  dischargeCurveTable = {}
-  for i = 0, 120 do
-    local v = 3.00 + i * 0.01
-    local a = 12
-    local b = 3.7
-    local percent = 100 / (1 + math.exp(-a * (v - b)))
-    dischargeCurveTable[i + 1] = math.floor(clamp(percent, 0, 100) + 0.5)
-  end
-end
+-- The discharge curve: percent(v) = 100 / (1 + exp(-12 * (v - 3.7))), rounded to a whole
+-- percent, over cell voltages 3.00 V to 4.20 V in steps of 0.01 V -- 121 entries, index 1 at
+-- 3.00 V. Those two constants and that grid are its only inputs, so the curve is a constant
+-- and is written as one. Built in a widget pass instead, it cost 3406 instructions in
+-- whichever pass first estimated fuel from voltage, on top of whatever that pass already
+-- carried and against the 20000 a widget call is billed at; as a table constructor it is one
+-- to two instructions per entry, paid once when this module is loaded.
+local dischargeCurveTable = {
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+    0,   0,   0,   0,   1,   1,   1,   1,   1,   1,   1,
+    1,   1,   1,   2,   2,   2,   2,   3,   3,   3,   4,
+    4,   5,   5,   6,   7,   7,   8,   9,  10,  12,  13,
+   14,  16,  17,  19,  21,  23,  25,  28,  30,  33,  35,
+   38,  41,  44,  47,  50,  53,  56,  59,  62,  65,  67,
+   70,  72,  75,  77,  79,  81,  83,  84,  86,  87,  88,
+   90,  91,  92,  93,  93,  94,  95,  95,  96,  96,  97,
+   97,  97,  98,  98,  98,  98,  99,  99,  99,  99,  99,
+   99,  99,  99,  99,  99, 100, 100, 100, 100, 100, 100,
+}
 
 local function getSession()
   local root = _G and _G.rfsuite
@@ -131,29 +140,51 @@ local function getSensor(name)
   return Sensors.getValue(name)
 end
 
-local function readSourceValue(query)
-  if type(system) ~= "table" or type(system.getSource) ~= "function" then
-    return nil
+-- Hand a computed value to the rest of this Lua state, under rfsuite.session.smartfuel.
+--
+-- Everything inside the suite that wants these two numbers runs in the same Lua state as the
+-- code that computes them: the dashboard widget's telemetry read, the flight record, and the
+-- tool's own audio path each drive this module through tasks/events/runtime.lua. Writing the
+-- value out as a telemetry sensor and reading it straight back is therefore a detour through
+-- the radio, and it costs what any detour through the sensor table costs -- a model write per
+-- publication, and a value that has been through a sensor of precision 0.
+--
+-- The sensor is the export for everything OUTSIDE this state, which the hand-over cannot reach
+-- and which has no other way to the value: logical switches, special functions, the stock
+-- telemetry screens and the radio's own telemetry log. SmFt in particular is not interchangeable
+-- with Bat% there, because the reserve is already applied on the way to it and not on the way to
+-- Bat%. It is published only where the model asks for it -- see `publishSensors` above -- because
+-- once it is no longer the transport it is a cost paid for a reader who may not exist.
+--
+-- The fuel percentage is handed over as it was computed. Consumption is handed over rounded,
+-- as the sensor publishes it: it is a milliamp-hour count, and no consumer of it asks for a
+-- fraction.
+-- Both keys are written together, and a key the pass did not compute is written as nil. A
+-- value that is no longer being produced must not shadow the sensor chain behind it: the local
+-- source can be switched from voltage to current mid-session, and the consumption the voltage
+-- path estimates then stops existing while the flight controller's own count carries on.
+local function handOver(fuel, consumption)
+  local session = getSession()
+  if type(session) ~= "table" then return end
+  local values = session.smartfuel
+  if type(values) ~= "table" then
+    values = {}
+    session.smartfuel = values
   end
-  local source = system.getSource(query)
-  if not source then return nil end
-  if source.state and source:state() == false then return nil end
-  return source:value()
+  values.fuel = fuel
+  values.consumption = consumption
 end
 
-local function readFirstSourceValue(queries)
-  for i = 1, #queries do
-    local value = readSourceValue(queries[i])
-    if type(value) == "number" then
-      return value
-    end
+local function clearHandOver()
+  local session = getSession()
+  if type(session) == "table" then
+    session.smartfuel = nil
   end
-  return nil
 end
 
 local function readFirmwareFuelValue()
   -- Avoid feedback loops: never use SmFt (smartfuel alias) as input for SmFt calculation.
-  -- Prefer direct FC fuel percentage first, then mirror appIds as fallback.
+  -- Prefer the direct FC fuel percentage, then the battery percentage sensor.
   local value = tonumber(getSensor("fuel"))
   if type(value) == "number" then
     return value, "fuel"
@@ -164,47 +195,16 @@ local function readFirmwareFuelValue()
     return value, "Bat%"
   end
 
-  value = readFirstSourceValue(MIRROR_FUEL_QUERIES)
-  if type(value) == "number" then
-    return value, "mirror"
-  end
-
   return nil, nil
 end
 
-local function applyReservePercent(value, warningPercent)
-  if type(value) ~= "number" then return nil end
-  local fuel = clamp(value, 0, 100)
-  local warning = clamp(tonumber(warningPercent) or 0, 0, 99)
-  if warning > 0 then
-    fuel = (fuel - warning) * 100 / (100 - warning)
-  end
-  return clamp(fuel, 0, 100)
-end
-
-local function sanitizeReservePercent(value)
-  local reserve = tonumber(value)
-  if reserve == nil then return RESERVE_DEFAULT end
-  reserve = math.floor(reserve + 0.5)
-  if reserve < RESERVE_MIN or reserve > RESERVE_MAX then
-    return RESERVE_DEFAULT
-  end
-  return reserve
-end
-
 local function resolveReservePercent(session, batteryConfig)
-  local batteryPrefs = session and session.modelPreferences and session.modelPreferences.battery or nil
-  local reserve = batteryPrefs and batteryPrefs.consumption_warning_percentage
-  if reserve == nil then
-    reserve = batteryConfig and batteryConfig.consumptionWarningPercentage
-  end
-  reserve = sanitizeReservePercent(reserve)
-
-  if batteryConfig then
-    batteryConfig.consumptionWarningPercentage = reserve
-  end
-
-  return reserve
+  -- Fix for issue #52: do not write back into batteryConfig here. The session's
+  -- battery_config must keep what the flight controller reported so that
+  -- loadFromSession on the Battery page can display the board's actual value
+  -- rather than the substituted preference. SmartFuel only needs the resolved
+  -- number locally and is not authoritative for the page's display.
+  return Reserve.resolve(session, batteryConfig)
 end
 
 local function scaleField(raw, fallback, minValue, maxValue, scale)
@@ -260,6 +260,7 @@ local function getSmartConfig(session)
 
   local voltageDropRate = tonumber(pick("voltage_drop_rate"))
   local chargeDropRate = tonumber(pick("charge_drop_rate"))
+  local sagGain = tonumber(pick("sag_gain")) or 40
 
   local voltageFallPerSecond = nil
   if voltageDropRate ~= nil then
@@ -278,18 +279,75 @@ local function getSmartConfig(session)
   return {
     firmwareSource = getFirmwareSource(),
     source = source,
+    -- Whether the two sensors are published at all. Read from the model's own preferences and
+    -- deliberately NOT through `pick`: `pick` lets the flight controller's SmartFuel
+    -- configuration win, and what the radio exports to its own logical switches and telemetry
+    -- screens is not the board's to decide.
+    --
+    -- Absent means ON: this is what the suite has always done, and the setting exists to turn
+    -- it off rather than to turn it on. Only an explicit `false` stops the publication, so a
+    -- store written before the setting existed keeps publishing and a warning a pilot has built
+    -- on SmFt survives the update. Nothing inside the suite depends on it either way -- those
+    -- consumers are served by the hand-over below.
+    publishSensors = (batteryPrefs and batteryPrefs.smartfuel_publish) ~= false,
     stabilizeDelaySeconds = scaleField(pick("stabilize_delay"), 1.5, 0, 10, 1000),
     stableWindowVolts = scaleField(pick("stable_window"), 0.15, 0, 1, 100),
     voltageFallPerSecond = voltageFallPerSecond,
-    fuelDropPerSecond = fuelDropPerSecond
+    fuelDropPerSecond = fuelDropPerSecond,
+    sagGain = sagGain
   }
+end
+
+-- Firmware with per-profile battery cells (tasks/msp/api/battery_config.lua, `hasProfileCells`)
+-- reports the single cell count and cell voltage fields for the profile that was active when the
+-- configuration was read, and every reader in this Lua state -- the fallback below, the voltage
+-- callouts, the flight record, the dashboard -- reads those single fields. So once the
+-- battery_profile sensor names another profile they are set from that profile's own values, which
+-- is what the board reports for them from then on. The sensor carries the profile the board is
+-- running: a change made while armed is applied by the board at disarm, and the sensor follows it
+-- then. On firmware without the per-profile values nothing is changed.
+local PROFILE_CELL_KEYS = {}
+do
+  local fields = { "batteryCellCount", "vbatmincellvoltage", "vbatmaxcellvoltage", "vbatfullcellvoltage", "vbatwarningcellvoltage" }
+  for f = 1, #fields do
+    local keys = {}
+    for profile = 0, 5 do keys[profile] = fields[f] .. "_" .. profile end
+    PROFILE_CELL_KEYS[fields[f]] = keys
+  end
+end
+
+-- Once per profile and per read: a fresh read is a new table, and the Battery page sets the single
+-- fields itself when it saves.
+local function applyProfileCells(config, profile)
+  if type(config) ~= "table" or config.hasProfileCells ~= true or config.cellsProfile == profile then return end
+  for field, keys in pairs(PROFILE_CELL_KEYS) do
+    local value = config[keys[profile]]
+    if value ~= nil then config[field] = value end
+  end
+  config.cellsProfile = profile
 end
 
 local function getActivePackCapacity(session, batteryConfig)
   local packCapacity = tonumber(batteryConfig and batteryConfig.batteryCapacity) or 0
-  local profile = normalizeBatteryProfileIndex(getSensor("battery_profile"))
+  local raw = getSensor("battery_profile")
+  local profile = normalizeBatteryProfileIndex(raw)
   if session then
     session.activeBatteryType = profile
+  end
+
+  -- Only a live reading: the sensor reads 0 once the radio stops receiving it, and that names no
+  -- profile.
+  if batteryConfig and batteryConfig.hasProfileCells == true then
+    raw = tonumber(raw)
+    if raw and raw >= 1 and raw <= 6 then
+      applyProfileCells(batteryConfig, profile)
+      -- The battery and sources pages keep a second name for the configuration, and a page that
+      -- set it before a later read can leave it naming an older table.
+      local other = session and session.batteryConfig
+      if other and other ~= batteryConfig then
+        applyProfileCells(other, profile)
+      end
+    end
   end
 
   if profile ~= nil and batteryConfig then
@@ -303,7 +361,7 @@ local function getActivePackCapacity(session, batteryConfig)
 end
 
 local function getUsableCapacity(packCapacity, reserve)
-  local safeReserve = sanitizeReservePercent(reserve)
+  local safeReserve = Reserve.sanitize(reserve)
   local usable = packCapacity * (1 - safeReserve / 100)
   if usable < 10 then usable = packCapacity end
   return usable, safeReserve
@@ -311,11 +369,10 @@ end
 
 local function fuelPercentageFromVoltage(voltage, cellCount, batteryConfig, reserve)
   if not cellCount or cellCount <= 0 then return nil end
-  ensureCurve()
 
   local minV = (tonumber(batteryConfig and batteryConfig.vbatmincellvoltage) or 330) / 100
   local fullV = (tonumber(batteryConfig and batteryConfig.vbatfullcellvoltage) or 410) / 100
-  local safeReserve = sanitizeReservePercent(reserve)
+  local safeReserve = Reserve.sanitize(reserve)
 
   local voltagePerCell = voltage / cellCount
   if voltagePerCell >= fullV then return 100 end
@@ -329,10 +386,7 @@ local function fuelPercentageFromVoltage(voltage, cellCount, batteryConfig, rese
   index = clamp(index, 1, #dischargeCurveTable)
 
   local rawPercent = dischargeCurveTable[index]
-  local usableSpan = 100 - safeReserve
-  if usableSpan <= 0 then return rawPercent end
-  if rawPercent <= safeReserve then return 0 end
-  return ((rawPercent - safeReserve) / usableSpan) * 100
+  return Reserve.applyPercent(rawPercent, safeReserve)
 end
 
 local function isArmed()
@@ -383,14 +437,14 @@ end
 local function computeCurrentMode(voltage, cellCount, batteryConfig, usableCapacity, stabilized, reserve)
   local consumption = tonumber(getSensor("consumption"))
   if not consumption then
-    if not stabilized then return nil, nil end
-    return fuelPercentageFromVoltage(voltage, cellCount, batteryConfig, reserve), nil
+    if not stabilized then return nil end
+    return fuelPercentageFromVoltage(voltage, cellCount, batteryConfig, reserve)
   end
 
   if state.startConsumptionOffset == nil then
     -- Wait for stable voltage before estimating starting capacity
     if not stabilized then
-       return nil, consumption
+       return nil
     end
     
     local startPercent = fuelPercentageFromVoltage(voltage, cellCount, batteryConfig, reserve) or 100
@@ -401,13 +455,13 @@ local function computeCurrentMode(voltage, cellCount, batteryConfig, usableCapac
   end
 
   if usableCapacity <= 0 then
-    return nil, consumption
+    return nil
   end
 
   local used = consumption - state.startConsumptionOffset
   local percentUsed = (used / usableCapacity) * 100
   local remaining = clamp(100 - percentUsed, 0, 100)
-  return remaining, consumption
+  return remaining
 end
 
 local function computeVoltageMode(now, voltage, cellCount, batteryConfig, usableCapacity, cfg, armed, reserve)
@@ -422,7 +476,8 @@ local function computeVoltageMode(now, voltage, cellCount, batteryConfig, usable
 
   local filteredVoltage = voltage
   if previousVoltage then
-    local maxDrop = dt * cfg.voltageFallPerSecond
+    local sagFactor = 1.0 - math.max(0, math.min(0.5, (cfg.sagGain or 40) / 100 * 0.5))
+    local maxDrop = dt * cfg.voltageFallPerSecond * sagFactor
     if voltage < previousVoltage then
       filteredVoltage = math.max(voltage, previousVoltage - maxDrop)
     end
@@ -468,14 +523,35 @@ local function publishTelemetryValue(sid, value, unit, sensorName, cacheValueKey
 end
 
 function Smart.wakeup()
-  if not initialized then
-    Sensors = loadModule("lib/sensors.lua")
-    MspRuntime = loadModule("tasks/msp/runtime.lua")
-    Log = loadModule("lib/log.lua")
-    ApiVersion = loadModule("lib/api_version.lua")
-    initialized = true
+  -- One module per wakeup. In the widget the dashboard loads three of the five at its top level
+  -- and the MSP runtime's version read loads lib/api_version.lua, so those slots are normally
+  -- memoizer lookups. What still compiles here is lib/smartfuel_reserve.lua, which otherwise
+  -- only the tool's pages load, and without the memoizer every slot would. One per call keeps
+  -- that compile in a call of its own, as tasks.lua does with its modules. A slot that cannot be
+  -- filled is recorded as `false` rather than left nil, so an absent module is not asked for
+  -- again on every wakeup; the two guards below already read `false` as absent.
+  if Sensors == nil then
+    Sensors = loadModule("lib/sensors.lua") or false
+    return
+  end
+  if MspRuntime == nil then
+    MspRuntime = loadModule("tasks/msp/runtime.lua") or false
+    return
+  end
+  if Log == nil then
+    Log = loadModule("lib/log.lua") or false
+    return
+  end
+  if ApiVersion == nil then
+    ApiVersion = loadModule("lib/api_version.lua") or false
+    return
+  end
+  if Reserve == nil then
+    Reserve = loadModule("lib/smartfuel_reserve.lua") or false
+    return
   end
   if not Sensors then return end
+  if not Reserve then return end
 
   local session = getSession()
   if type(session) ~= "table" or session.isConnected ~= true then
@@ -534,7 +610,6 @@ function Smart.wakeup()
     logSmart("smart reset source=" .. tostring(sourceMode) .. " cap=" .. tostring(packCapacity), "info")
   end
 
-  local voltage = tonumber(getSensor("voltage"))
   if not firmwareActive then
     if not voltage or voltage <= 2 then
       resetComputedState()
@@ -550,16 +625,14 @@ function Smart.wakeup()
   end
 
   local fuelPercent = nil
-  local smartConsumption = nil
+  local virtualConsumption = nil
   if firmwareActive then
     local rawFuel, rawFuelSource = readFirmwareFuelValue()
-    local rawConsumption = readFirstSourceValue(MIRROR_CONSUMPTION_QUERIES)
-    fuelPercent = applyReservePercent(rawFuel, reserve)
-    smartConsumption = rawConsumption
+    fuelPercent = Reserve.applyPercent(rawFuel, reserve)
     if type(fuelPercent) ~= "number" then
       if (now - (state.lastFirmwareFuelMissingLog or 0)) >= 5.0 then
         state.lastFirmwareFuelMissingLog = now
-        logSmart("smart firmware fuel missing mirror/sensor fallback (reserve=" .. tostring(reserve) .. ")", "warn")
+        logSmart("smart firmware fuel missing (reserve=" .. tostring(reserve) .. ")", "warn")
       end
     elseif (state.lastFirmwareFuelMissingLog or 0) ~= 0 then
       logSmart("smart firmware fuel recovered from " .. tostring(rawFuelSource) .. " raw=" .. tostring(rawFuel), "info")
@@ -567,25 +640,41 @@ function Smart.wakeup()
     end
   else
     if sourceMode == 1 then
-      fuelPercent, smartConsumption = computeVoltageMode(now, voltage, cellCount, batteryConfig, usableCapacity, cfg, armed, reserve)
+      fuelPercent, virtualConsumption = computeVoltageMode(now, voltage, cellCount, batteryConfig, usableCapacity, cfg, armed, reserve)
     else
-      fuelPercent, smartConsumption = computeCurrentMode(voltage, cellCount, batteryConfig, usableCapacity, stabilized, reserve)
+      fuelPercent = computeCurrentMode(voltage, cellCount, batteryConfig, usableCapacity, stabilized, reserve)
     end
   end
 
+  local percent = nil
   if type(fuelPercent) == "number" then
-    publishTelemetryValue(APPID_SMARTFUEL, clamp(fuelPercent, 0, 100), UNIT_PERCENT or 0, SENSOR_NAME_SMARTFUEL, "lastFuelValue", "lastFuelPush")
+    percent = clamp(fuelPercent, 0, 100)
+    if cfg.publishSensors then
+      publishTelemetryValue(APPID_SMARTFUEL, percent, UNIT_PERCENT or 0, SENSOR_NAME_SMARTFUEL, "lastFuelValue", "lastFuelPush")
+    end
   end
 
-  if type(smartConsumption) ~= "number" then
-    smartConsumption = tonumber(getSensor("consumption"))
+  -- SmCp carries the virtual consumption computed in voltage mode and nothing else. On the other
+  -- paths the value would be the consumption the flight controller already publishes, so the
+  -- sensor would spend a second slot -- and one model write per push -- on a copy of it.
+  local consumed = nil
+  if type(virtualConsumption) == "number" and virtualConsumption >= 0 then
+    local mah = math.max(0, virtualConsumption)
+    consumed = roundInt(mah)
+    if cfg.publishSensors then
+      publishTelemetryValue(APPID_SMARTCONSUMPTION, mah, UNIT_MAH or 0, SENSOR_NAME_SMARTCONSUMPTION,
+        "lastConsumptionValue", "lastConsumptionPush")
+    end
   end
-  if type(smartConsumption) == "number" and smartConsumption >= 0 then
-    publishTelemetryValue(APPID_SMARTCONSUMPTION, math.max(0, smartConsumption), UNIT_MAH or 0, SENSOR_NAME_SMARTCONSUMPTION, "lastConsumptionValue", "lastConsumptionPush")
-  end
+
+  -- Only a wakeup that got this far writes the hand-over. One that returned earlier -- no
+  -- battery configuration yet, no pack voltage, or simply inside the wakeup interval -- leaves
+  -- the last pair standing, which is what the two sensors do as well.
+  handOver(percent, consumed)
 end
 
 function Smart.reset()
+  clearHandOver()
   state.batterySignature = nil
   state.sourceMode = nil
   state.stabilizeUntil = 0

@@ -17,13 +17,22 @@ return function(ctx)
   local help_p3 = t(i18n, "help_p3", "Offset limit: Angle limit for High Speed Integral (O-term).")
   local help_p4 = t(i18n, "help_p4", "Error rotation: Allow errors to be shared between all axes.")
   local help_p5 = t(i18n, "help_p5", "I-term relax: Limit accumulation of I-term during fast movements - helps reduce bounce back after fast stick movements.")
+  local help_stick_gain = t(i18n, "help_stick_gain", "Error Decay Stick Gain: the further the cyclic stick is deflected, the faster the cyclic I-term decays, on the ground and in flight; 0 = off.")
 
-  local parts = { help_p1, help_p2, help_p3 }
+  local parts = { help_p1 }
   local session = ctx.session or (_G.rfsuite and _G.rfsuite.session)
   local rawApiVersion = session and session.apiVersion
   
   local ApiVersion = loadModule("lib/api_version.lua")
   local showRotation = not (rawApiVersion and rawApiVersion ~= "" and tostring(rawApiVersion) ~= "0" and ApiVersion and ApiVersion.isAtLeast and ApiVersion.isAtLeast(rawApiVersion, {12, 0, 9}))
+  local showStickGain = rawApiVersion and rawApiVersion ~= "" and tostring(rawApiVersion) ~= "0"
+    and ApiVersion and ApiVersion.isAtLeast and ApiVersion.isAtLeast(rawApiVersion, {12, 0, 10})
+
+  if showStickGain then
+    parts[#parts + 1] = help_stick_gain
+  end
+  parts[#parts + 1] = help_p2
+  parts[#parts + 1] = help_p3
 
   if showRotation then
     parts[#parts + 1] = help_p4

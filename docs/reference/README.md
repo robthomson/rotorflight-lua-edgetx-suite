@@ -1,0 +1,25 @@
+---
+title: Reference
+sidebar_label: Reference
+---
+
+# Reference
+
+Mechanics that span every page. A page file names the condition that applies to it and
+links here for the explanation.
+
+| File | What it will say | Start from | Status |
+| --- | --- | --- | --- |
+| `hidden-and-locked-pages.md` | The six reasons a tile is absent, greyed out or read-only: no flight controller yet, the model is armed, the firmware's MSP API is too old, a preview switch is off, developer tools are off, the ESC telemetry protocol does not match. | nowhere yet | to write |
+| `preview-features.md` | What a preview feature is, the one-switch-per-feature rule, the confirmation when a switch goes on, and the features currently behind one. | in-app help of the General page | to write |
+| `saving-and-reboot.md` | What happens on *Save*: the write, the EEPROM commit, the reboot where the firmware needs one, the reconnect and the read-back; which pages reboot; what each dialog and timeout means. | nowhere yet | to write |
+| [`saving.md`](saving.md) | The shared *Save* action: why it needs a complete read first, the confirmation question and when it is asked regardless, a save that restarts the flight controller and how a dismissed one reports its outcome, which pages read again when a different flight controller answers, the pages covered, and the ESC Configurator pages. | written | written |
+| `user-folder.md` | Everything under `/SCRIPTS/TOOLS/rfsuite.user/`: `preferences.lua`, the per-model `<mcu id>.lua`, `model_name_restore.lua`, `reload.req`, user themes, the flight log files, session logs; what survives an update. The three store files have a page of their own — link to `configuration-files.md` rather than repeating it. | README, one sentence | to write |
+| `configuration-files.md` | The two settings files the suite keeps on the card: that they are Lua data, how to edit one by hand, what a broken one does, and the one-time migration from the former `.ini` files — including that it is the tool or the background decoder that does it, never a widget. | written | written |
+| `flight-statistics.md` | The record of each flight's extremes and its armed time: where it is published, which widget keeps it, what each field means, when a flight starts and ends, why the totals come from the flight controller and can fall by a short flight, and the deprecated field names a theme may still be reading. | written | written |
+| `background-decoder.md` | The optional special-function script that decodes the flight controller's custom telemetry outside the widget: what it is for, that the suite installs it itself, how to switch it off, and why a model already running another background decoder does not get one. | written | written |
+| `telemetry-sensors.md` | How the flight controller's custom telemetry becomes sensors on the radio: that every sensor the Telemetry page offers is decoded, that a sensor the suite does not recognise stops the frame and costs everything packed behind it, the two sensors the suite computes itself from the pack, why `SmFt` is not `Bat%` and how they are switched off, and the two frame counters the decoder adds. | written | written |
+| `sensor-selection.md` | How a value is matched to one of the model's telemetry sensors, how long that choice lasts, why a sensor the radio has never sent is not taken for a reading of zero, and the three different events that make the match happen again. | written | written |
+| `supported-firmware.md` | The MSP API versions the suite speaks (12.08, 12.09, 12.10), what a page that needs a newer one does, and the unsupported-API dialog. | README | to write |
+| [`esc-status.md`](esc-status.md) | The speed controller's own health as a dashboard reading: the two flight-controller sensors it is decoded from and that neither is selected by default, which ESC telemetry protocols report a status word at all and which report nothing, the three severity levels, and the two readings it offers -- what the controller is saying now, and the worst it has said since the flight controller connected. | written | written |
+| [`connection-status.md`](connection-status.md) | The connection button in the header: its four symbols -- no telemetry link, connecting, connected, and something went wrong -- what the notice behind a press shows in each, and what it means when a step of the connect sequence was given up on. | written | written |

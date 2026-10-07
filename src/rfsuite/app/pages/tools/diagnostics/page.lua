@@ -1,9 +1,5 @@
 local M = {}
 
-function M.getModuleTitle()
-  return "Diagnostics"
-end
-
 function M.isPageOpen()
   return true
 end

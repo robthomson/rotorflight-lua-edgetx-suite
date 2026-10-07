@@ -1,4 +1,6 @@
 -- EdgeTX MSP API: SERVO_OVERRIDE (ported)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {
   command = 192,
@@ -33,7 +35,7 @@ function Api.parse(buf)
     parsed["servo_" .. i] = read_u16_le(buf, pos)
     pos = pos + 2
   end
-  return { parsed = parsed }
+  return parsed
 end
 
 function Api.buildWritePayload(data)

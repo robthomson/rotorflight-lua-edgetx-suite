@@ -1,4 +1,6 @@
 -- EdgeTX API: FLIGHT_STATS_INI (minimal port)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {}
 
@@ -32,9 +34,9 @@ function Api.parse(buf)
     parsed.flightcount = read_u32()
     parsed.lastflighttime = read_u32()
     parsed.totalflighttime = read_u32()
-    return { parsed = parsed }
+    return parsed
   end
-  return { parsed = defaults() }
+  return defaults()
 end
 
 function Api.buildWritePayload(payloadData)

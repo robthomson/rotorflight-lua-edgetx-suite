@@ -1,15 +1,7 @@
 return function(ctx)
   local i18n = ctx and ctx.i18n or nil
-  local key = "app.pages.setup_power_battery.help_message"
-  local fallback = "The battery settings are used to configure the flight controller to monitor the battery voltage and provide warnings when the voltage drops below a certain level."
-
-  local message = fallback
-  if i18n and i18n.t then
-    local translated = i18n.t(key)
-    if translated and translated ~= key and translated ~= "" then
-      message = translated
-    end
-  end
+  local message = i18n and i18n.t and i18n.t("app.pages.setup_power_battery.help_message")
+    or "Selected Battery: the active profile; changing it here switches it.\nBattery 1 to 6: the capacity stored in each profile.\nEdit Battery: with per-profile cells, the profile shown below; saving does not activate it, and each voltage stops at its neighbours.\nMax cell voltage: top of a cell's range; used to detect the cell count.\nFull cell voltage: what a full cell reads.\nWarn cell voltage: the low-voltage warning starts here.\nMin cell voltage: the low-voltage alarm level.\nCell count: 0 lets the flight controller detect it.\nConsumption reserve: the share of the capacity held back."
 
   return {
     message = message

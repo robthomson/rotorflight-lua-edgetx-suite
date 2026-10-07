@@ -274,7 +274,7 @@ local function triggerLiveWrite()
 
   if not queue:isProcessed() then return end
 
-  if not copyConfigToApi() then return end
+  if not M.canSave() or not copyConfigToApi() then return end
 
   local mixerCfgPayload = MixerConfigApi.buildWritePayload(ui.apiData.MIXER_CONFIG)
   local pitchPayload = MixerInputPitchApi.buildWritePayload(ui.apiData.GET_MIXER_INPUT_PITCH)
@@ -314,6 +314,7 @@ end
 
 local function queueGeometryRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not MspRuntime or not MixerConfigApi or not MixerInputPitchApi or not MixerInputRollApi or not MixerInputCollectiveApi or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -339,6 +340,7 @@ local function queueGeometryRead(isAutoReload)
     simulatorResponse = MixerConfigApi.simulatorResponse,
     processReply = function(self, buf)
       local parsed = MixerConfigApi.parse(buf)
+      if type(parsed) ~= "table" then return Common.failPageRead(ui) end
       if parsed then
         ui.apiData.MIXER_CONFIG = parsed
         ui.config.geo_correction = parsed.swash_geo_correction * 2
@@ -360,6 +362,7 @@ local function queueGeometryRead(isAutoReload)
         simulatorResponse = MixerInputPitchApi.simulatorResponse,
         processReply = function(self, buf)
           local parsed = MixerInputPitchApi.parse(buf)
+          if type(parsed) ~= "table" then return Common.failPageRead(ui) end
           if parsed then
             ui.apiData.GET_MIXER_INPUT_PITCH = parsed
             ui.config.ele_direction = rateToDir(parsed.rate_stabilized_pitch)
@@ -381,6 +384,7 @@ local function queueGeometryRead(isAutoReload)
             simulatorResponse = MixerInputRollApi.simulatorResponse,
             processReply = function(self, buf)
               local parsed = MixerInputRollApi.parse(buf)
+              if type(parsed) ~= "table" then return Common.failPageRead(ui) end
               if parsed then
                 ui.apiData.GET_MIXER_INPUT_ROLL = parsed
                 ui.config.ail_direction = rateToDir(parsed.rate_stabilized_roll)
@@ -398,6 +402,7 @@ local function queueGeometryRead(isAutoReload)
                 simulatorResponse = MixerInputCollectiveApi.simulatorResponse,
                 processReply = function(self, buf)
                   local parsed = MixerInputCollectiveApi.parse(buf)
+                  if type(parsed) ~= "table" then return Common.failPageRead(ui) end
                   if parsed then
                     ui.apiData.GET_MIXER_INPUT_COLLECTIVE = parsed
                     ui.config.col_direction = rateToDir(parsed.rate_stabilized_collective)
@@ -410,6 +415,7 @@ local function queueGeometryRead(isAutoReload)
                   saveToSession()
 
                   ui.runtime.readPending = false
+                  ui.runtime.readComplete = true
                   ui.loading = false
                   ui.dirty = false
                   ui.progress = 100
@@ -467,7 +473,7 @@ local function queueGeometryWrite()
     return false, "msp_queue_unavailable"
   end
 
-  if not copyConfigToApi() then
+  if not M.canSave() or not copyConfigToApi() then
     return false, "loaded_data_missing"
   end
 
@@ -541,16 +547,6 @@ local function ensureLoaded()
   queueGeometryRead(false)
 end
 
-function M.onLoad()
-  ensureDeps()
-  ensureLoaded()
-end
-
-function M.onActivate()
-  ensureDeps()
-  ensureLoaded()
-end
-
 function M.wakeup(ctx)
   ensureDeps()
   ensureLoaded()
@@ -577,9 +573,20 @@ function M.getHeaderActions()
   return {
     save = true,
     reload = true,
-    star = true,
+    -- Switching setup mode on waits for this visit's read, as Save does (M.canSave below):
+    -- until then the live write sends nothing. Switching it off is always offered.
+    star = ui.inOverride or M.canSave(),
     menu = true
   }
+end
+
+-- The page is kept between visits and loadFromSession() puts the last records read back into
+-- ui.apiData before this visit's read is even queued, so "the records are there" says nothing
+-- about this visit. ui.runtime is dropped by resetPageState() on close, which makes this flag
+-- the visit's own: set only when every read of the chain parsed, cleared when a read starts.
+-- The live write in setup mode is held back by it too: it sends the same whole records.
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
 end
 
 function M.build(ctx)
@@ -797,8 +804,8 @@ end
 function M.onSave(ctx)
   local ok, err = queueGeometryWrite()
   if not ok then
-    if lvgl and lvgl.alert then
-      lvgl.alert({
+    if ctx and type(ctx.reportSave) == "function" then
+      ctx.reportSave({
         title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
         message = tostring(err or "MSP write failed")
       })
@@ -807,8 +814,9 @@ function M.onSave(ctx)
   end
 
   ui.dirty = false
-  if lvgl and lvgl.alert then
-    lvgl.alert({
+  if ctx and type(ctx.reportSave) == "function" then
+    ctx.reportSave({
+      ok = true,
       title = pageText(ctx and ctx.i18n, "saved_title", "Saved"),
       message = pageText(ctx and ctx.i18n, "saved_message", "Swashplate geometry settings saved")
     })
@@ -828,6 +836,7 @@ end
 
 function M.onStar(ctx)
   if not ConfirmDialog then return false end
+  if not ui.inOverride and not M.canSave() then return false end
 
   local i18n = ctx and ctx.i18n
   local title
@@ -846,6 +855,8 @@ function M.onStar(ctx)
     message = message,
     onConfirm = function()
       if not ui.inOverride then
+        -- Checked again: Yes comes later than the press, and the page may have closed since.
+        if not M.canSave() then return end
         setOverride(true)
         ui.inOverride = true
       else
@@ -861,9 +872,6 @@ function M.onStar(ctx)
   return true
 end
 
-function M.allowMemAutoRefresh()
-  return true
-end
 
 function M.onClose()
   if ui.inOverride then

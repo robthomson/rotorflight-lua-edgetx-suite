@@ -20,8 +20,29 @@ local Api = {
     64, 6,   -- batteryCapacity_2
     108, 7,  -- batteryCapacity_3
     152, 8,  -- batteryCapacity_4
-    196, 9   -- batteryCapacity_5
+    196, 9,  -- batteryCapacity_5
+    6, 6, 6, 6, 6, 6,                               -- batteryCellCount_0..5
+    74, 1, 74, 1, 74, 1, 74, 1, 74, 1, 74, 1,       -- vbatmincellvoltage_0..5
+    164, 1, 164, 1, 164, 1, 164, 1, 164, 1, 164, 1, -- vbatmaxcellvoltage_0..5
+    154, 1, 154, 1, 154, 1, 154, 1, 154, 1, 154, 1, -- vbatfullcellvoltage_0..5
+    94, 1, 94, 1, 94, 1, 94, 1, 94, 1, 94, 1        -- vbatwarningcellvoltage_0..5
   },
+}
+
+-- Firmware with per-profile battery cells appends five blocks after the six capacities: the cell
+-- count of every profile (U8 x 6), then the min, max, full and warning cell voltage of every
+-- profile (U16 x 6 each), 54 bytes in all. The legacy single fields then carry the values of the
+-- profile that is active when the reply is built. The blocks are recognised by the reply's length
+-- rather than by the API version: MSP API 12.10 was reported by firmware builds for weeks before
+-- the blocks were added, and a 12.9 board always answers 27 bytes.
+local PROFILE_COUNT = 6
+local PROFILE_CELL_BYTES = 6 * (1 + 4 * 2)
+Api.PROFILE_CELL_FIELDS = {
+  "batteryCellCount",
+  "vbatmincellvoltage",
+  "vbatmaxcellvoltage",
+  "vbatfullcellvoltage",
+  "vbatwarningcellvoltage",
 }
 
 local function parseU16(lo, hi)
@@ -70,6 +91,24 @@ function Api.parse(buf)
       idx = idx + 2
     end
   end
+  -- Per-profile cells: batteryCellCount_0..5, then vbat<min|max|full|warning>cellvoltage_0..5.
+  -- The probe is ">=", so it cannot tell these five blocks from different fields a later firmware
+  -- might append here, and this message carries no version byte to ask instead: a later layout
+  -- needs an MSP2 command or an explicit discriminator.
+  if out.batteryCapacity_5 ~= nil and #buf - idx + 1 >= PROFILE_CELL_BYTES then
+    for i = 0, PROFILE_COUNT - 1 do
+      out["batteryCellCount_" .. i] = buf[idx] or 0
+      idx = idx + 1
+    end
+    for f = 2, #Api.PROFILE_CELL_FIELDS do
+      local field = Api.PROFILE_CELL_FIELDS[f]
+      for i = 0, PROFILE_COUNT - 1 do
+        out[field .. "_" .. i] = parseU16(buf[idx], buf[idx+1])
+        idx = idx + 2
+      end
+    end
+    out.hasProfileCells = true
+  end
   return out
 end
 
@@ -97,6 +136,20 @@ function Api.buildWritePayload(data)
   if data.batteryCapacities then
     for i = 1, 6 do
       appendU16(data.batteryCapacities[i])
+    end
+    -- Only behind the capacities: the board reads the capacities first whenever 12 bytes remain,
+    -- so cell blocks sent without them would be taken for capacities. And only where the read
+    -- carried them, so a board without per-profile cells never receives them.
+    if data.hasProfileCells then
+      for i = 0, PROFILE_COUNT - 1 do
+        payload[#payload+1] = tonumber(data["batteryCellCount_" .. i]) or 0
+      end
+      for f = 2, #Api.PROFILE_CELL_FIELDS do
+        local field = Api.PROFILE_CELL_FIELDS[f]
+        for i = 0, PROFILE_COUNT - 1 do
+          appendU16(data[field .. "_" .. i])
+        end
+      end
     end
   end
   return payload

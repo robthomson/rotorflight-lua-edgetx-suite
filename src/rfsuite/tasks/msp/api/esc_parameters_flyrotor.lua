@@ -33,7 +33,17 @@ local FIELD_SPEC = {
     {"auto_restart_time", "U8"},
     {"restart_acc", "U8"},
     {"gov_p", "U8"},
-    {"gov_i", "U8"}
+    {"gov_i", "U8"},
+    {"active_freewheel", "U8"},
+    {"drive_freq", "U8"},
+    {"max_motor_erpm", "U24", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "big"},
+    {"throttle_protocol", "U8"},
+    {"telemetry_protocol", "U8"},
+    {"led_color", "U8"},
+    {"led_rgb", "U24", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "big"},
+    {"motor_temp_sensor", "U8"},
+    {"motor_temp", "U8"},
+    {"capacity_cutoff", "U16", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, "big"}
 }
 
 local SIM_RESPONSE = {
@@ -63,15 +73,31 @@ local SIM_RESPONSE = {
     15, -- auto_restart_time
     15, -- restart_acc
     45, -- gov_p
-    35  -- gov_i
+    35, -- gov_i
+    1, -- active_freewheel
+    16, -- drive_freq
+    1, 251, 208, -- max_motor_erpm (big)
+    1, -- throttle_protocol
+    0, -- telemetry_protocol
+    3, -- led_color
+    0, 0, 0, -- led_rgb (big)
+    0, -- motor_temp_sensor
+    100, -- motor_temp
+    0, 0 -- capacity_cutoff (big)
 }
 
 local TYPE_LEN = {
     U8 = 1, S8 = 1, U16 = 2, S16 = 2, U24 = 3, U32 = 4, U64 = 8, U120 = 15, U128 = 16
 }
 
+local PAYLOAD_LEN = 0
+for _, f in ipairs(FIELD_SPEC) do PAYLOAD_LEN = PAYLOAD_LEN + (TYPE_LEN[f[2]] or 1) end
+
+-- pairs, not ipairs. The flag is the FOURTEENTH element of a field table whose elements 3 to
+-- 13 are nil, and ipairs stops at the first hole -- so with ipairs this returned false for
+-- every field, including the three that carry the flag.
 local function has_big_flag(field)
-    for _, v in ipairs(field) do if v == "big" then return true end end
+    for _, v in pairs(field) do if v == "big" then return true end end
     return false
 end
 
@@ -114,6 +140,16 @@ local function pack_unsigned(v, len, big)
     return out
 end
 
+-- EdgeTX builds Lua with LUA_32BITS, so a 64-bit value has no exact representation: reading
+-- one into a number and writing it back does not round-trip. The only 64-bit field here is
+-- an identifier that nothing displays or edits, so it is carried as the bytes it arrived as
+-- and written back untouched.
+local function raw_bytes(buf, pos, len)
+    local out = {}
+    for i = 0, len - 1 do out[#out+1] = (tonumber(buf[pos + i]) or 0) & 0xFF end
+    return out
+end
+
 local function pack_string(s, len)
     s = s or ""
     local out = {}
@@ -123,16 +159,22 @@ end
 
 Api.fields = FIELD_SPEC
 Api.simulatorResponse = SIM_RESPONSE
+Api.payloadLength = PAYLOAD_LEN
 
 function Api.parse(buf)
     if type(buf) ~= "table" then return nil end
+    if #buf < PAYLOAD_LEN then return nil end
+    if tonumber(buf[1]) ~= Api.mspSignature then return nil end
     local pos = 1
     local out = {}
     for _, f in ipairs(FIELD_SPEC) do
         local name, typ = f[1], f[2]
         local len = TYPE_LEN[typ] or 1
         local big = has_big_flag(f)
-        if typ == "U120" or typ == "U128" then
+        if typ == "U64" then
+            out[name] = raw_bytes(buf, pos, len)
+            pos = pos + len
+        elseif typ == "U120" or typ == "U128" then
             out[name] = bytes_to_string(buf, pos, len)
             pos = pos + len
         elseif typ == "S8" then
@@ -154,7 +196,11 @@ function Api.buildWritePayload(data)
         local len = TYPE_LEN[typ] or 1
         local big = has_big_flag(f)
         local v = data[name]
-        if typ == "U120" or typ == "U128" then
+        if typ == "U64" then
+            local bytes = v
+            if type(bytes) ~= "table" or #bytes ~= len then bytes = pack_unsigned(0, len, big) end
+            for i = 1, len do payload[#payload+1] = bytes[i] or 0 end
+        elseif typ == "U120" or typ == "U128" then
             local bytes = pack_string(v, len)
             for _, b in ipairs(bytes) do payload[#payload+1] = b end
         else

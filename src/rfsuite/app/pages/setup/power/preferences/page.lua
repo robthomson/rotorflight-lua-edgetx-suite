@@ -18,11 +18,19 @@ local MODEL_TYPE_MIN = 0
 local MODEL_TYPE_MAX = 2
 local LOCAL_SOURCE_MIN = 0
 local LOCAL_SOURCE_MAX = 2
+-- Amps. Zero is not a limit but the absence of one, and it is the default: a controller that
+-- reports its own limit fills this in without being asked, and a model whose controller does not
+-- simply has no ESC load reading until somebody types the figure in.
+local ESC_CURRENT_LIMIT_MIN = 0
+-- Well above the largest limit any of the three reporting families can express, so that a value
+-- a controller reported is never clamped on its way onto this row.
+local ESC_CURRENT_LIMIT_MAX = 700
 
 local function newRuntime()
 	return {
 		modelTypeSet = nil,
 		localSourceSet = nil,
+		escCurrentLimitSet = nil,
 		requestRebuild = nil,
 		openHelp = nil,
 		inlineHelpHandler = nil,
@@ -35,7 +43,8 @@ local ui = {
 	dirty = false,
 	config = {
 		smartfuel_model_type = 0,
-		smartfuel_source = 0
+		smartfuel_source = 0,
+		esc_current_limit = 0
 	},
 	runtime = newRuntime()
 }
@@ -97,6 +106,8 @@ local function buildSessionSignature()
 	local batteryPrefs = getBatteryPrefs(session)
 	if not batteryPrefs then return "nil" end
 	return tostring(batteryPrefs.smartfuel_model_type or "") .. "|" .. tostring(batteryPrefs.smartfuel_source or batteryPrefs.calc_local or "")
+		.. "|" .. tostring(batteryPrefs.smartfuel_publish == true)
+		.. "|" .. tostring(batteryPrefs.esc_current_limit or "")
 end
 
 local function markDirty()
@@ -121,6 +132,10 @@ local function loadFromSession()
 
 	ui.config.smartfuel_model_type = clampInt(batteryPrefs and batteryPrefs.smartfuel_model_type, MODEL_TYPE_MIN, MODEL_TYPE_MAX, 0)
 	ui.config.smartfuel_source = clampInt((batteryPrefs and batteryPrefs.smartfuel_source) or (batteryPrefs and batteryPrefs.calc_local), LOCAL_SOURCE_MIN, LOCAL_SOURCE_MAX, 0)
+	-- Absent means on: a store written before this setting existed describes a suite that
+	-- published, and only an explicit `false` turns it off.
+	ui.config.smartfuel_publish = (batteryPrefs and batteryPrefs.smartfuel_publish) ~= false
+	ui.config.esc_current_limit = clampInt(batteryPrefs and batteryPrefs.esc_current_limit, ESC_CURRENT_LIMIT_MIN, ESC_CURRENT_LIMIT_MAX, 0)
 end
 
 local function ensureLoaded()
@@ -161,6 +176,28 @@ local function getLocalSourceSetter()
 	return ui.runtime.localSourceSet
 end
 
+local function getPublishSetter()
+	if ui.runtime.publishSet then return ui.runtime.publishSet end
+	ui.runtime.publishSet = function(value)
+		local nextValue = value == true
+		if ui.config.smartfuel_publish == nextValue then return end
+		ui.config.smartfuel_publish = nextValue
+		markDirty()
+	end
+	return ui.runtime.publishSet
+end
+
+local function getEscCurrentLimitSetter()
+	if ui.runtime.escCurrentLimitSet then return ui.runtime.escCurrentLimitSet end
+	ui.runtime.escCurrentLimitSet = function(value)
+		local nextValue = clampInt(value, ESC_CURRENT_LIMIT_MIN, ESC_CURRENT_LIMIT_MAX, 0)
+		if ui.config.esc_current_limit == nextValue then return end
+		ui.config.esc_current_limit = nextValue
+		markDirty()
+	end
+	return ui.runtime.escCurrentLimitSet
+end
+
 local function buildModelTypeOptions(i18n)
 	return {
 		{ value = 0, label = pageText(i18n, "value_auto", "AUTO") },
@@ -187,9 +224,6 @@ function M.getHeaderActions()
 	}
 end
 
-function M.allowMemAutoRefresh()
-	return true
-end
 
 function M.onReload()
 	ensureDeps()
@@ -211,11 +245,13 @@ function M.onSave(ctx)
 	batteryPrefs.smartfuel_model_type = clampInt(ui.config.smartfuel_model_type, MODEL_TYPE_MIN, MODEL_TYPE_MAX, 0)
 	batteryPrefs.smartfuel_source = clampInt(ui.config.smartfuel_source, LOCAL_SOURCE_MIN, LOCAL_SOURCE_MAX, 0)
 	batteryPrefs.calc_local = batteryPrefs.smartfuel_source
+	batteryPrefs.smartfuel_publish = ui.config.smartfuel_publish == true
+	batteryPrefs.esc_current_limit = clampInt(ui.config.esc_current_limit, ESC_CURRENT_LIMIT_MIN, ESC_CURRENT_LIMIT_MAX, 0)
 
 	local okPrefs, errPrefs = saveModelPreferences(session)
 	if not okPrefs then
-		if lvgl and lvgl.alert then
-			lvgl.alert({
+		if ctx and type(ctx.reportSave) == "function" then
+			ctx.reportSave({
 				title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
 				message = pageText(ctx and ctx.i18n, "save_error_message", "Save failed") .. ": " .. tostring(errPrefs or "io")
 			})
@@ -223,8 +259,9 @@ function M.onSave(ctx)
 		return false
 	end
 
-	if lvgl and lvgl.alert then
-		lvgl.alert({
+	if ctx and type(ctx.reportSave) == "function" then
+		ctx.reportSave({
+			ok = true,
 			title = pageText(ctx and ctx.i18n, "saved_title", "Saved"),
 			message = pageText(ctx and ctx.i18n, "saved_message", "Power preferences saved")
 		})
@@ -282,7 +319,7 @@ function M.build(ctx)
 		}
 	)
 
-	Controls.appendComboSelect(
+	cursorY = cursorY + Controls.appendComboSelect(
 		children, x, cursorY, w,
 		pageText(i18n, "calcfuel_local", "Local SmartFuel Source"),
 		buildLocalSourceOptions(i18n),
@@ -291,6 +328,41 @@ function M.build(ctx)
 		{
 			helpText = optionalPageHelpText(i18n, "help_calcfuel_local"),
 			helpTitle = pageText(i18n, "calcfuel_local", "Local SmartFuel Source"),
+			onHelp = getInlineHelpHandler()
+		}
+	)
+
+	cursorY = cursorY + Controls.appendRadioSwitch(
+		children, x, cursorY, w,
+		pageText(i18n, "publish_sensors", "Publish SmFt / SmCp"),
+		ui.config.smartfuel_publish,
+		getPublishSetter(),
+		{
+			helpText = optionalPageHelpText(i18n, "help_publish_sensors"),
+			helpTitle = pageText(i18n, "publish_sensors", "Publish SmFt / SmCp"),
+			onHelp = getInlineHelpHandler()
+		}
+	)
+
+	local notSetLabel = pageText(i18n, "value_not_set", "NOT SET")
+	Controls.appendNumberField(
+		children, x, cursorY, w,
+		pageText(i18n, "esc_current_limit", "ESC Current Limit"),
+		{
+			min = ESC_CURRENT_LIMIT_MIN,
+			max = ESC_CURRENT_LIMIT_MAX,
+			step = 1,
+			-- Zero is the absence of a limit rather than a limit of nothing, and it reads as
+			-- that rather than as "0A".
+			display = function(val)
+				local amps = tonumber(val) or 0
+				if amps <= 0 then return notSetLabel end
+				return string.format("%dA", math.floor(amps))
+			end,
+			get = function() return ui.config.esc_current_limit end,
+			set = getEscCurrentLimitSetter(),
+			helpText = optionalPageHelpText(i18n, "help_esc_current_limit"),
+			helpTitle = pageText(i18n, "esc_current_limit", "ESC Current Limit"),
 			onHelp = getInlineHelpHandler()
 		}
 	)

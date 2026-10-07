@@ -1,4 +1,6 @@
 -- EdgeTX MSP API: SENSOR_CONFIG (ported)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {
   command = 96,
@@ -48,7 +50,7 @@ function Api.parse(buf)
   p.gyroCalibrationDuration = read_u16_le(buf, pos); pos = pos + 2
   p.gyro_offset_yaw = read_u16_le(buf, pos); pos = pos + 2
   p.checkOverflow = tonumber(buf[pos]) or 0; pos = pos + 1
-  return { parsed = p }
+  return p
 end
 
 function Api.buildWritePayload(data)

@@ -1,15 +1,11 @@
 return function(ctx)
   local i18n = ctx and ctx.i18n or nil
-  local key = "app.pages.setup_power_preferences.help_message"
-  local fallback = "Configure model type and local SmartFuel source preferences."
-
-  local message = fallback
-  if i18n and i18n.t then
-    local translated = i18n.t(key)
-    if translated and translated ~= key and translated ~= "" then
-      message = translated
-    end
-  end
+  -- Joined in a local of its own, for the reason given in settings/general/help.lua.
+  local fallback = "Configure the model type, the local SmartFuel source, whether SmFt and SmCp are "
+    .. "published as sensors, and the current limit the speed controller is set to allow. "
+    .. "Nothing here is written to the flight controller: the settings are kept on the "
+    .. "radio, per flight controller."
+  local message = i18n and i18n.t and i18n.t("app.pages.setup_power_preferences.help_message") or fallback
 
   return {
     message = message

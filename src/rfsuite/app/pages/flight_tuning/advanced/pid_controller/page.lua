@@ -15,6 +15,7 @@ local MspRuntime = nil
 local PidProfileApi = nil
 local LoadingOverlay = nil
 local Sensors = nil
+local Profile = nil
 local ApiVersion = nil
 local t = nil
 
@@ -48,28 +49,13 @@ local function ensureDeps()
   if not PidProfileApi then PidProfileApi = loadModule("tasks/msp/api/pid_profile.lua") end
   if not LoadingOverlay then LoadingOverlay = loadModule("ui/loading_overlay.lua") end
   if not Sensors then Sensors = loadModule("lib/sensors.lua") end
+  if not Profile then Profile = loadModule("lib/profile.lua") end
   if not ApiVersion then ApiVersion = loadModule("lib/api_version.lua") end
   if not t then t = Common and Common.pageT("flight_tuning_advanced_pid_controller") or nil end
   
   if Common then
     if not ui.runtimeBase then
-      ui.runtimeBase = Common.createProfileAwareRuntime({
-        profileGetter = function()
-          local sensorProfile = nil
-          if Sensors and type(Sensors.getValue) == "function" then
-            sensorProfile = tonumber(Sensors.getValue("pid_profile"))
-          end
-          if sensorProfile and sensorProfile > 0 then
-            return math.floor(sensorProfile)
-          end
-          local session = getSession()
-          local activeProfile = session and session.activeProfile
-          if activeProfile ~= nil then
-            return math.floor(tonumber(activeProfile) or 0) + 1
-          end
-          return 1
-        end
-      })
+      ui.runtimeBase = Common.createProfileAwareRuntime({ profileType = "pid" })
     end
     if type(ui.runtime) ~= "table" then
       ui.runtime = newRuntime()
@@ -108,6 +94,7 @@ end
 
 local function queueRcRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not PidProfileApi or not MspRuntime or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -118,6 +105,7 @@ local function queueRcRead(isAutoReload)
     return false, "msp_queue_unavailable"
   end
 
+  local readValid = type(getSession()) == "table"
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -132,6 +120,7 @@ local function queueRcRead(isAutoReload)
     simulatorResponse = PidProfileApi.simulatorResponse,
     processReply = function(self, buf)
       local parsed = PidProfileApi.parse(buf)
+      if type(parsed) ~= "table" then return Common.failPageRead(ui) end
       if parsed then
         local session = getSession()
         if session then
@@ -144,6 +133,7 @@ local function queueRcRead(isAutoReload)
           ui.loading = false
           ui.dirty = false
           ui.progress = 100
+          ui.runtime.readComplete = readValid
           if type(ui.runtime.requestRebuild) == "function" then
             ui.runtime.requestRebuild()
           end
@@ -151,6 +141,7 @@ local function queueRcRead(isAutoReload)
       end
     end,
     errorHandler = function()
+      readValid = false
       ui.runtime.readPending = false
       ui.loading = false
       if type(ui.runtime.requestRebuild) == "function" then
@@ -209,18 +200,7 @@ local function queueRcWrite()
 end
 
 local function getLiveProfile()
-  if Sensors and type(Sensors.getValue) == "function" then
-    local raw = tonumber(Sensors.getValue("pid_profile"))
-    if raw and raw > 0 then
-      return math.floor(raw)
-    end
-  end
-  local session = getSession()
-  local activeProfile = tonumber(session and session.activeProfile)
-  if activeProfile ~= nil then
-    return math.floor(activeProfile) + 1
-  end
-  return 1
+  return Profile and Profile.getActivePidProfile(1) or 1
 end
 
 local function getBaseTitle()
@@ -264,13 +244,13 @@ end
 
 
 local function appendSingleFieldRow(children, x, y, w, labelText, label1, key1, spec1)
-  local rowH = 52
-  local labelY = y + 16
-  local cellTop = y + 4
+  local rowH = (Controls and Controls.ROW_H) or 40
+  local labelY = (Controls and Controls.labelY and Controls.labelY(y, rowH)) or (y + math.floor((rowH - 21) / 2))
+  local cellTop = (Controls and Controls.controlY and Controls.controlY(y, rowH)) or (y + math.floor((rowH - 32) / 2))
 
-  local editW1   = math.floor(w * 0.14)
-  local labelW1  = math.floor(w * 0.22)
-  local labelGap = 6
+  local editW1   = math.floor(w * 0.24)
+  local labelW1  = math.floor(w * 0.16)
+  local labelGap = 4
 
   local xEdit1   = x + w - editW1 - 10
   local xLabel1  = xEdit1 - labelW1
@@ -308,7 +288,6 @@ local function appendSingleFieldRow(children, x, y, w, labelText, label1, key1, 
     x = xEdit1,
     y = cellTop,
     w = editW1,
-    h = 44,
     min = math.floor(rawMin / stepSize),
     max = math.ceil(rawMax / stepSize),
     active = function() return true end,
@@ -335,22 +314,22 @@ local function appendSingleFieldRow(children, x, y, w, labelText, label1, key1, 
     type   = "rectangle",
     x = x, y = y + rowH,
     w = w, h = 1,
-    color  = GREY_DEFAULT, filled = true
+    color  = COLOR_THEME_SECONDARY2, filled = true
   }
 
   return rowH + 1
 end
 
 local function appendDualFieldRow(children, x, y, w, rowLabel, label1, key1, spec1, label2, key2, spec2)
-  local rowH = 52
-  local labelY = y + 16
-  local cellTop = y + 4
+  local rowH = (Controls and Controls.ROW_H) or 40
+  local labelY = (Controls and Controls.labelY and Controls.labelY(y, rowH)) or (y + math.floor((rowH - 21) / 2))
+  local cellTop = (Controls and Controls.controlY and Controls.controlY(y, rowH)) or (y + math.floor((rowH - 32) / 2))
   
-  local editW   = math.floor(w * 0.14)
-  local labelW  = math.floor(w * 0.11)
+  local editW   = math.floor(w * 0.24)
+  local labelW  = math.floor(w * 0.14)
   local gap     = 8
   local margin  = 10
-  local labelGap = 6
+  local labelGap = 4
   
   local xEdit2  = x + w - editW - margin
   local xLabel2 = xEdit2 - labelW - gap
@@ -390,7 +369,6 @@ local function appendDualFieldRow(children, x, y, w, rowLabel, label1, key1, spe
     x = xEdit1,
     y = cellTop,
     w = editW,
-    h = 44,
     min = math.floor(rawMin / stepSize),
     max = math.ceil(rawMax / stepSize),
     active = function() return true end,
@@ -434,7 +412,6 @@ local function appendDualFieldRow(children, x, y, w, rowLabel, label1, key1, spe
       x = xEdit2,
       y = cellTop,
       w = editW,
-      h = 44,
       min = math.floor(rawMinB / stepSizeB),
       max = math.ceil(rawMaxB / stepSizeB),
       active = function() return true end,
@@ -462,20 +439,20 @@ local function appendDualFieldRow(children, x, y, w, rowLabel, label1, key1, spe
     type   = "rectangle",
     x = x, y = y + rowH,
     w = w, h = 1,
-    color  = GREY_DEFAULT, filled = true
+    color  = COLOR_THEME_SECONDARY2, filled = true
   }
 
   return rowH + 1
 end
 
 local function appendTripleFieldRow(children, x, y, w, i18n, labelText, key0, spec0, key1, spec1, key2, spec2)
-  local rowH = 52
-  local labelY = y + 16
-  local cellTop = y + 4
+  local rowH = (Controls and Controls.ROW_H) or 40
+  local labelY = (Controls and Controls.labelY and Controls.labelY(y, rowH)) or (y + math.floor((rowH - 21) / 2))
+  local cellTop = (Controls and Controls.controlY and Controls.controlY(y, rowH)) or (y + math.floor((rowH - 32) / 2))
 
   -- Calculate the exact same startX as appendDualFieldRow to keep alignment consistent
-  local editW   = math.floor(w * 0.14)
-  local labelW  = math.floor(w * 0.11)
+  local editW   = math.floor(w * 0.20)
+  local labelW  = math.floor(w * 0.14)
   local gap     = 8
   local margin  = 10
   
@@ -546,7 +523,6 @@ local function appendTripleFieldRow(children, x, y, w, i18n, labelText, key0, sp
         x = editX[i],
         y = cellTop,
         w = editW,
-        h = 44,
         min = math.floor(rawMin / stepSize),
         max = math.ceil(rawMax / stepSize),
         active = function() return true end,
@@ -575,18 +551,18 @@ local function appendTripleFieldRow(children, x, y, w, i18n, labelText, key0, sp
     type   = "rectangle",
     x = x, y = y + rowH,
     w = w, h = 1,
-    color  = GREY_DEFAULT, filled = true
+    color  = COLOR_THEME_SECONDARY2, filled = true
   }
 
   return rowH + 1
 end
 
 local function appendSingleChoiceRow(children, x, y, w, labelText, key, options)
-  local rowH = 52
-  local labelY = y + 16
-  local cellTop = y + 4
+  local rowH = (Controls and Controls.ROW_H) or 48
+  local labelY = (Controls and Controls.labelY and Controls.labelY(y, rowH)) or (y + math.floor((rowH - 21) / 2))
+  local cellTop = (Controls and Controls.controlY and Controls.controlY(y, rowH)) or (y + math.floor((rowH - 32) / 2))
 
-  local comboW = math.floor(w * 0.22)
+  local comboW = math.floor(w * 0.24)
   local comboX = x + w - comboW - 10
   local mainW = comboX - x - 8
 
@@ -608,8 +584,8 @@ local function appendSingleChoiceRow(children, x, y, w, labelText, key, options)
 
   children[#children + 1] = {
     type  = "choice",
-    x = comboX, y = cellTop + 4,
-    w = comboW, h = 36,
+    x = comboX, y = cellTop,
+    w = comboW,
     title = labelText,
     values = values,
     get = function()
@@ -632,20 +608,10 @@ local function appendSingleChoiceRow(children, x, y, w, labelText, key, options)
     type   = "rectangle",
     x = x, y = y + rowH,
     w = w, h = 1,
-    color  = GREY_DEFAULT, filled = true
+    color  = COLOR_THEME_SECONDARY2, filled = true
   }
 
   return rowH + 1
-end
-
-function M.onLoad()
-  ensureDeps()
-  ensureLoaded()
-end
-
-function M.onActivate()
-  ensureDeps()
-  ensureLoaded()
 end
 
 function M.wakeup(ctx)
@@ -704,16 +670,15 @@ function M.build(ctx)
   local cursorY = y
   if Controls and type(Controls.appendStaticSectionHeader) == "function" then
     Controls.appendStaticSectionHeader(children, x, cursorY, w, displayTitle)
-    cursorY = cursorY + (Controls.STATIC_SECTION_H or 50)
+    cursorY = cursorY + (Controls.STATIC_SECTION_H or 38)
   end
-
-  cursorY = cursorY + 10
 
   -- Specs
   local specDecay  = { scale=10, mult=1, min=0, max=250, suffix="s", decimals=1 }
   local specLimitC = { scale=1, mult=1, min=0, max=25, suffix="°", decimals=0 }
   local specLimitE = { scale=1, mult=1, min=0, max=180, suffix="°", decimals=0 }
   local specCutoff = { scale=1, mult=1, min=1, max=100, suffix="Hz", decimals=0 }
+  local specGain   = { scale=1, mult=1, min=0, max=250, suffix="", decimals=0 }
 
   -- 1) Ground Error Decay (single right-aligned field)
   cursorY = cursorY + appendSingleFieldRow(children, x, cursorY, w,
@@ -727,6 +692,15 @@ function M.build(ctx)
     pageText(i18n, "time", "Time"), "error_decay_time_cyclic", specDecay,
     pageText(i18n, "limit", "Limit"), "error_decay_limit_cyclic", specLimitC
   )
+
+  -- 3) Error decay stick gain (single field, API 12.10 and later). It scales the cyclic decay
+  -- on the ground and in flight alike, so it has a row of its own rather than a third column.
+  if type(ui.config.error_decay_gain_cyclic) == "number" and isAtLeastVersion({12, 0, 10}) then
+    cursorY = cursorY + appendSingleFieldRow(children, x, cursorY, w,
+      pageText(i18n, "error_decay_stick_gain", "Error Decay Stick Gain"),
+      "", "error_decay_gain_cyclic", specGain
+    )
+  end
 
   -- 4) Error limit (triple field: Roll, Pitch, Yaw)
   cursorY = cursorY + appendTripleFieldRow(children, x, cursorY, w, i18n,
@@ -777,7 +751,12 @@ function M.build(ctx)
   )
 end
 
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
+  if not M.canSave() then return false, "loaded_data_missing" end
   queueRcWrite()
   return true
 end
@@ -800,9 +779,6 @@ function M.onHelp(ctx)
   return { title = "Help", message = "No help available" }
 end
 
-function M.allowMemAutoRefresh()
-  return true
-end
 
 function M.onClose()
   if Common and type(Common.resetPageState) == "function" then

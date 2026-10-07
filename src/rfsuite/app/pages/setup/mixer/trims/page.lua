@@ -160,7 +160,7 @@ local function triggerLiveWrite()
 
   if not queue:isProcessed() then return end
 
-  if not ui.apiData.MIXER_CONFIG then return end
+  if not M.canSave() or not ui.apiData.MIXER_CONFIG then return end
 
   ui.apiData.MIXER_CONFIG.swash_trim_0 = ui.config.swash_trim_0
   ui.apiData.MIXER_CONFIG.swash_trim_1 = ui.config.swash_trim_1
@@ -181,6 +181,7 @@ end
 
 local function queueTrimsRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not MspRuntime or not MixerConfigApi or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -205,6 +206,7 @@ local function queueTrimsRead(isAutoReload)
     simulatorResponse = MixerConfigApi.simulatorResponse,
     processReply = function(self, buf)
       local parsed = MixerConfigApi.parse(buf)
+      if type(parsed) ~= "table" then return Common.failPageRead(ui) end
       if parsed then
         ui.apiData.MIXER_CONFIG = parsed
         ui.config.tail_rotor_mode = parsed.tail_rotor_mode
@@ -217,6 +219,7 @@ local function queueTrimsRead(isAutoReload)
       saveToSession()
 
       ui.runtime.readPending = false
+      ui.runtime.readComplete = true
       ui.loading = false
       ui.dirty = false
       ui.progress = 100
@@ -247,7 +250,7 @@ local function queueTrimsWrite()
     return false, "msp_queue_unavailable"
   end
 
-  if not ui.apiData.MIXER_CONFIG then
+  if not M.canSave() or not ui.apiData.MIXER_CONFIG then
     return false, "loaded_data_missing"
   end
 
@@ -299,16 +302,6 @@ local function ensureLoaded()
   queueTrimsRead(false)
 end
 
-function M.onLoad()
-  ensureDeps()
-  ensureLoaded()
-end
-
-function M.onActivate()
-  ensureDeps()
-  ensureLoaded()
-end
-
 function M.wakeup(ctx)
   ensureDeps()
   ensureLoaded()
@@ -335,9 +328,20 @@ function M.getHeaderActions()
   return {
     save = true,
     reload = true,
-    star = true,
+    -- Switching the override on waits for this visit's read, as Save does (M.canSave below):
+    -- until then the live write sends nothing. Switching it off is always offered.
+    star = ui.inOverride or M.canSave(),
     menu = true
   }
+end
+
+-- The page is kept between visits and loadFromSession() puts the last record read back into
+-- ui.apiData before this visit's read is even queued, so "a MIXER_CONFIG is there" says nothing
+-- about this visit. ui.runtime is dropped by resetPageState() on close, which makes this flag
+-- the visit's own: set only by a read that parsed, cleared when a read starts.
+-- The live write while the override is on is held back by it too: it sends the same whole record.
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
 end
 
 function M.build(ctx)
@@ -462,8 +466,8 @@ end
 function M.onSave(ctx)
   local ok, err = queueTrimsWrite()
   if not ok then
-    if lvgl and lvgl.alert then
-      lvgl.alert({
+    if ctx and type(ctx.reportSave) == "function" then
+      ctx.reportSave({
         title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
         message = tostring(err or "MSP write failed")
       })
@@ -472,8 +476,9 @@ function M.onSave(ctx)
   end
 
   ui.dirty = false
-  if lvgl and lvgl.alert then
-    lvgl.alert({
+  if ctx and type(ctx.reportSave) == "function" then
+    ctx.reportSave({
+      ok = true,
       title = pageText(ctx and ctx.i18n, "saved_title", "Saved"),
       message = pageText(ctx and ctx.i18n, "saved_message", "Servo trims saved")
     })
@@ -493,6 +498,7 @@ end
 
 function M.onStar(ctx)
   if not ConfirmDialog then return false end
+  if not ui.inOverride and not M.canSave() then return false end
 
   local i18n = ctx and ctx.i18n
   local title
@@ -511,6 +517,8 @@ function M.onStar(ctx)
     message = message,
     onConfirm = function()
       if not ui.inOverride then
+        -- Checked again: Yes comes later than the press, and the page may have closed since.
+        if not M.canSave() then return end
         setOverride(true)
         ui.inOverride = true
       else
@@ -526,9 +534,6 @@ function M.onStar(ctx)
   return true
 end
 
-function M.allowMemAutoRefresh()
-  return true
-end
 
 function M.onClose()
   if ui.inOverride then

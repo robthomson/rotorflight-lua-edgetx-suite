@@ -16,6 +16,7 @@ local MspRuntime = nil
 local BatteryConfigApi = nil
 local BatteryProfileApi = nil
 local Sensors = nil
+local SmartFuelReserve = nil
 local t = nil
 
 M.eepromWrite = true
@@ -29,10 +30,24 @@ local CELL_COUNT_MAX = 24
 local RESERVE_MIN = 15
 local RESERVE_MAX = 60
 
+-- The settings firmware with per-profile battery cells keeps once per battery profile, with the
+-- range the board accepts and the default. Every profile is written back on save, so a profile the
+-- pilot does not touch keeps the board's own value even where it lies outside the 2.50 V the
+-- fields start at (the board takes cell voltages from 1.00 V).
+local CELL_FIELDS = { "batteryCellCount", "vbatmincellvoltage", "vbatmaxcellvoltage", "vbatfullcellvoltage", "vbatwarningcellvoltage" }
+local CELL_LIMITS = {
+	batteryCellCount = { CELL_COUNT_MIN, CELL_COUNT_MAX, 0 },
+	vbatmincellvoltage = { 100, 500, 330 },
+	vbatmaxcellvoltage = { 100, 500, 420 },
+	vbatfullcellvoltage = { 100, 500, 410 },
+	vbatwarningcellvoltage = { 100, 500, 350 }
+}
+
 local function newRuntime()
 	return {
 		capacitySets = {},
 		profileSet = nil,
+		editProfileSet = nil,
 		maxCellSet = nil,
 		fullCellSet = nil,
 		warnCellSet = nil,
@@ -50,6 +65,14 @@ end
 local ui = {
 	loaded = false,
 	dirty = false,
+	-- Tracks whether the pilot has actively changed the Consumption reserve field
+	-- in this session. Only when true will onSave write consumptionWarningPercentage
+	-- back to the flight controller, preventing silent overwrites of cbat_alert_percent.
+	reserveDirty = false,
+	-- Tracks whether the pilot has actively changed the Selected Battery combo in this
+	-- session. Only when true does onSave send MSP_SET_BATTERY_PROFILE, so a page that has
+	-- no source for the active profile never switches the profile the board is running.
+	profileDirty = false,
 	config = {
 		selectedBatteryProfile = 0,
 		capacities = { 0, 0, 0, 0, 0, 0 },
@@ -58,6 +81,13 @@ local ui = {
 		vbatwarningcellvoltage = 350,
 		vbatmincellvoltage = 330,
 		batteryCellCount = 0,
+		-- One list of six per CELL_FIELDS entry where the board keeps them per profile, else nil
+		-- and the five single values above apply to every profile.
+		profileCells = nil,
+		-- The profile the five rows show and edit where the board keeps them per profile. Its own
+		-- choice, so editing another profile never switches the board to it; nil until the page
+		-- has loaded, and then the active profile.
+		editBatteryProfile = nil,
 		consumption_warning_percentage = 35
 	},
 	runtime = newRuntime(),
@@ -88,6 +118,7 @@ local function ensureDeps()
 	if not BatteryConfigApi then BatteryConfigApi = loadModule("tasks/msp/api/battery_config.lua") end
 	if not BatteryProfileApi then BatteryProfileApi = loadModule("tasks/msp/api/battery_profile.lua") end
 	if not Sensors then Sensors = loadModule("lib/sensors.lua") end
+	if not SmartFuelReserve then SmartFuelReserve = loadModule("lib/smartfuel_reserve.lua") end
 	if not t then t = Common and Common.pageT("setup_power_battery") or nil end
 end
 
@@ -156,25 +187,35 @@ end
 
 local function getActiveProfileFromSensor()
 	if Sensors and type(Sensors.getValue) == "function" then
+		-- The flight controller reports this sensor as index + 1, so a live reading is 1..6.
+		-- A sensor the radio has stopped receiving reads 0 rather than nothing, and 0 is not a
+		-- value the sensor can carry: it means the reading is gone, not that profile 1 is
+		-- active. Anything outside 1..6 is therefore no answer at all.
 		local raw = tonumber(Sensors.getValue("battery_profile"))
 		if raw and raw >= 1 and raw <= 6 then
 			return math.floor(raw) - 1
-		end
-		if raw and raw >= 0 and raw <= 5 then
-			return math.floor(raw)
 		end
 	end
 	return nil
 end
 
+-- Returns the active battery profile as a 0-based index, or nil where the page has no source
+-- for it. Nil is a real answer here rather than a failure: BATTERY_PROFILE is a custom CRSF
+-- sensor and does not exist on a native CRSF link, MSP_BATTERY_CONFIG carries no profile
+-- field, and nothing in the suite issues MSP_BATTERY_PROFILE -- so on such a setup the page
+-- genuinely cannot know which profile the board is running. clampInt cannot express that,
+-- because it floors a nil input onto its fallback, so each source is tested before it is
+-- clamped.
 local function resolveProfile(session, batteryConfig)
 	local sensorProfile = getActiveProfileFromSensor()
 	if sensorProfile ~= nil then return sensorProfile end
-	local active = clampInt(session and session.activeBatteryType, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
-	if active ~= nil then return active end
-	local profileFromConfig = clampInt(batteryConfig and batteryConfig.batteryProfile, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
-	if profileFromConfig ~= nil then return profileFromConfig end
-	return PROFILE_MIN
+	if session ~= nil and tonumber(session.activeBatteryType) ~= nil then
+		return clampInt(session.activeBatteryType, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
+	end
+	if batteryConfig ~= nil and tonumber(batteryConfig.batteryProfile) ~= nil then
+		return clampInt(batteryConfig.batteryProfile, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
+	end
+	return nil
 end
 
 local function buildSessionSignature()
@@ -202,7 +243,9 @@ local function loadFromSession()
 	local session = getSession()
 	local batteryPrefs = getBatteryPrefs(session)
 	local batteryConfig = getBatteryConfig(session)
-	ui.config.selectedBatteryProfile = resolveProfile(session, batteryConfig)
+	-- With no source the combo still shows the first profile, as it always has; what changed
+	-- is that nothing is written to the board on the strength of that display.
+	ui.config.selectedBatteryProfile = resolveProfile(session, batteryConfig) or PROFILE_MIN
 
 	for i = 0, 5 do
 		ui.config.capacities[i + 1] = clampInt(batteryConfig and batteryConfig["batteryCapacity_" .. tostring(i)], CAPACITY_MIN, CAPACITY_MAX, 0)
@@ -214,9 +257,42 @@ local function loadFromSession()
 	ui.config.vbatmincellvoltage = clampInt(batteryConfig and batteryConfig.vbatmincellvoltage, 250, 500, 330)
 	ui.config.batteryCellCount = clampInt(batteryConfig and batteryConfig.batteryCellCount, CELL_COUNT_MIN, CELL_COUNT_MAX, 0)
 
-	local reserve = batteryPrefs and batteryPrefs.consumption_warning_percentage
+	-- Where the board keeps cell count and cell voltages per battery profile, the five fields show
+	-- and edit the profile chosen in Edit Battery, which opens on the active profile.
+	if ui.config.editBatteryProfile == nil then
+		ui.config.editBatteryProfile = ui.config.selectedBatteryProfile
+	end
+	if batteryConfig and batteryConfig.hasProfileCells == true then
+		local cells = {}
+		for f = 1, #CELL_FIELDS do
+			-- Thirty values on the pass that builds the page, so the range check is inline: the
+			-- parsed reply holds integers or nothing.
+			local field = CELL_FIELDS[f]
+			local limits = CELL_LIMITS[field]
+			local lo, hi, default = limits[1], limits[2], limits[3]
+			local prefix = field .. "_"
+			local values = {}
+			for i = 0, 5 do
+				local v = batteryConfig[prefix .. i] or default
+				if v < lo then v = lo elseif v > hi then v = hi end
+				values[i + 1] = v
+			end
+			cells[field] = values
+		end
+		ui.config.profileCells = cells
+	else
+		ui.config.profileCells = nil
+	end
+
+	-- Resolve consumption reserve: SmartFuelReserve.pick prioritizes explicit per-model
+	-- preference when set by the pilot, then falls through to the FC's cbat_alert_percent.
+	-- Since defaultModelPreferences() no longer seeds 35, unedited models will pick the board value.
+	local reserve = SmartFuelReserve and SmartFuelReserve.pick(session, batteryConfig)
 	if reserve == nil then
 		reserve = batteryConfig and batteryConfig.consumptionWarningPercentage
+		if reserve == nil then
+			reserve = batteryPrefs and batteryPrefs.consumption_warning_percentage
+		end
 	end
 	ui.config.consumption_warning_percentage = clampInt(reserve, RESERVE_MIN, RESERVE_MAX, 35)
 end
@@ -226,6 +302,7 @@ local function queueBatteryRead()
 	if ui.runtime.readPending then
 		return false
 	end
+	ui.runtime.readComplete = false
 	if not MspRuntime or not BatteryConfigApi or type(MspRuntime.getState) ~= "function" then
 		return false
 	end
@@ -237,6 +314,7 @@ local function queueBatteryRead()
 		return false
 	end
 
+	local readValid = type(getSession()) == "table"
 	ui.runtime.readPending = true
 	ui.loading = true
 	ui.progress = 0
@@ -250,6 +328,7 @@ local function queueBatteryRead()
 			ui.progress = 1
 			if type(session) == "table" then
 				local parsed = BatteryConfigApi.parse and BatteryConfigApi.parse(buf) or nil
+				if type(parsed) ~= "table" then return Common.failPageRead(ui) end
 				if type(parsed) == "table" then
 					session.battery_config = parsed
 					session.batteryConfig = parsed
@@ -258,11 +337,13 @@ local function queueBatteryRead()
 			if not ui.dirty then
 				loadFromSession()
 			end
+			ui.runtime.readComplete = readValid
 			if type(ui.runtime.requestRebuild) == "function" then
 				ui.runtime.requestRebuild()
 			end
 		end,
 		errorHandler = function()
+			readValid = false
 			ui.runtime.readPending = false
 			ui.loading = false
 			ui.progress = 1
@@ -300,18 +381,78 @@ local function getProfileSetter()
 		local nextValue = clampInt(value, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
 		if ui.config.selectedBatteryProfile == nextValue then return end
 		ui.config.selectedBatteryProfile = nextValue
+		ui.profileDirty = true
 		markDirty()
 	end
 	return ui.runtime.profileSet
 end
 
+-- Choosing which profile to look at changes nothing on the board, so it does not mark the page
+-- dirty and is not saved.
+local function getEditProfileSetter()
+	if ui.runtime.editProfileSet then return ui.runtime.editProfileSet end
+	ui.runtime.editProfileSet = function(value)
+		ui.config.editBatteryProfile = clampInt(value, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
+	end
+	return ui.runtime.editProfileSet
+end
+
+-- Both are clamped where they are set, and the five rows ask on every refresh.
+local function editSlot()
+	return (ui.config.editBatteryProfile or ui.config.selectedBatteryProfile or PROFILE_MIN) + 1
+end
+
+-- The value a cell field shows: the edited profile's where the board keeps them per profile, the
+-- single value otherwise.
+local function cellValue(field)
+	local cells = ui.config.profileCells
+	if cells then return cells[field][editSlot()] end
+	return ui.config[field]
+end
+
+-- A board with per-profile cells keeps every profile ordered min < max and
+-- min <= warning <= full <= max, and a profile saved out of that order is changed by the board
+-- itself while it stores it. So each voltage is held between its neighbours of the same profile,
+-- and what is saved here is what the board keeps.
+local function boundCellVoltage(field, value)
+	if not ui.config.profileCells then return value end
+	local minV = cellValue("vbatmincellvoltage")
+	local warnV = cellValue("vbatwarningcellvoltage")
+	local fullV = cellValue("vbatfullcellvoltage")
+	local maxV = cellValue("vbatmaxcellvoltage")
+	local lo, hi = 250, 500
+	if field == "vbatmaxcellvoltage" then
+		lo = math.max(fullV, minV + 1)
+	elseif field == "vbatfullcellvoltage" then
+		lo, hi = warnV, maxV
+	elseif field == "vbatwarningcellvoltage" then
+		lo, hi = minV, fullV
+	elseif field == "vbatmincellvoltage" then
+		hi = math.min(warnV, maxV - 1)
+	end
+	if hi < lo then hi = lo end
+	if value < lo then value = lo end
+	if value > hi then value = hi end
+	return value
+end
+
+local function setCellValue(field, value)
+	local cells = ui.config.profileCells
+	if cells then
+		local slot = editSlot()
+		if cells[field][slot] == value then return end
+		cells[field][slot] = value
+	else
+		if ui.config[field] == value then return end
+		ui.config[field] = value
+	end
+	markDirty()
+end
+
 local function getMaxCellSetter()
 	if ui.runtime.maxCellSet then return ui.runtime.maxCellSet end
 	ui.runtime.maxCellSet = function(value)
-		local nextValue = clampInt(value, 250, 500, 420)
-		if ui.config.vbatmaxcellvoltage == nextValue then return end
-		ui.config.vbatmaxcellvoltage = nextValue
-		markDirty()
+		setCellValue("vbatmaxcellvoltage", boundCellVoltage("vbatmaxcellvoltage", clampInt(value, 250, 500, 420)))
 	end
 	return ui.runtime.maxCellSet
 end
@@ -319,10 +460,7 @@ end
 local function getFullCellSetter()
 	if ui.runtime.fullCellSet then return ui.runtime.fullCellSet end
 	ui.runtime.fullCellSet = function(value)
-		local nextValue = clampInt(value, 250, 500, 410)
-		if ui.config.vbatfullcellvoltage == nextValue then return end
-		ui.config.vbatfullcellvoltage = nextValue
-		markDirty()
+		setCellValue("vbatfullcellvoltage", boundCellVoltage("vbatfullcellvoltage", clampInt(value, 250, 500, 410)))
 	end
 	return ui.runtime.fullCellSet
 end
@@ -330,10 +468,7 @@ end
 local function getWarnCellSetter()
 	if ui.runtime.warnCellSet then return ui.runtime.warnCellSet end
 	ui.runtime.warnCellSet = function(value)
-		local nextValue = clampInt(value, 250, 500, 350)
-		if ui.config.vbatwarningcellvoltage == nextValue then return end
-		ui.config.vbatwarningcellvoltage = nextValue
-		markDirty()
+		setCellValue("vbatwarningcellvoltage", boundCellVoltage("vbatwarningcellvoltage", clampInt(value, 250, 500, 350)))
 	end
 	return ui.runtime.warnCellSet
 end
@@ -341,10 +476,7 @@ end
 local function getMinCellSetter()
 	if ui.runtime.minCellSet then return ui.runtime.minCellSet end
 	ui.runtime.minCellSet = function(value)
-		local nextValue = clampInt(value, 250, 500, 330)
-		if ui.config.vbatmincellvoltage == nextValue then return end
-		ui.config.vbatmincellvoltage = nextValue
-		markDirty()
+		setCellValue("vbatmincellvoltage", boundCellVoltage("vbatmincellvoltage", clampInt(value, 250, 500, 330)))
 	end
 	return ui.runtime.minCellSet
 end
@@ -352,10 +484,7 @@ end
 local function getCellCountSetter()
 	if ui.runtime.cellCountSet then return ui.runtime.cellCountSet end
 	ui.runtime.cellCountSet = function(value)
-		local nextValue = clampInt(value, CELL_COUNT_MIN, CELL_COUNT_MAX, 0)
-		if ui.config.batteryCellCount == nextValue then return end
-		ui.config.batteryCellCount = nextValue
-		markDirty()
+		setCellValue("batteryCellCount", clampInt(value, CELL_COUNT_MIN, CELL_COUNT_MAX, 0))
 	end
 	return ui.runtime.cellCountSet
 end
@@ -366,6 +495,7 @@ local function getReserveSetter()
 		local nextValue = clampInt(value, RESERVE_MIN, RESERVE_MAX, 35)
 		if ui.config.consumption_warning_percentage == nextValue then return end
 		ui.config.consumption_warning_percentage = nextValue
+		ui.reserveDirty = true
 		markDirty()
 	end
 	return ui.runtime.reserveSet
@@ -383,7 +513,7 @@ local function buildBatteryPayload(batteryConfig)
 	for i = 0, 5 do
 		caps[i + 1] = tonumber(batteryConfig["batteryCapacity_" .. tostring(i)]) or 0
 	end
-	return BatteryConfigApi.buildWritePayload({
+	local data = {
 		batteryCapacity = tonumber(batteryConfig.batteryCapacity) or 0,
 		batteryCellCount = tonumber(batteryConfig.batteryCellCount) or 0,
 		voltageMeterSource = tonumber(batteryConfig.voltageMeterSource) or 0,
@@ -395,7 +525,19 @@ local function buildBatteryPayload(batteryConfig)
 		lvcPercentage = tonumber(batteryConfig.lvcPercentage) or 100,
 		consumptionWarningPercentage = tonumber(batteryConfig.consumptionWarningPercentage) or 35,
 		batteryCapacities = caps
-	})
+	}
+	-- The board stores the single fields into its active profile and then every profile from the
+	-- per-profile blocks, so the blocks are what decides each profile's values.
+	if batteryConfig.hasProfileCells == true then
+		data.hasProfileCells = true
+		for f = 1, #CELL_FIELDS do
+			for i = 0, 5 do
+				local key = CELL_FIELDS[f] .. "_" .. tostring(i)
+				data[key] = batteryConfig[key]
+			end
+		end
+	end
+	return BatteryConfigApi.buildWritePayload(data)
 end
 
 function M.getHeaderActions()
@@ -408,18 +550,24 @@ function M.getHeaderActions()
 	}
 end
 
-function M.allowMemAutoRefresh()
-	return true
-end
 
 function M.onReload()
 	ensureDeps()
 	ui.loaded = false
+	ui.dirty = false
+	ui.reserveDirty = false
+	ui.profileDirty = false
+	ui.config.editBatteryProfile = nil
 	ensureLoaded()
 	return false
 end
 
+function M.canSave()
+	return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
+	if not M.canSave() then return false, "loaded_data_missing" end
 	ensureDeps()
 	ensureLoaded()
 
@@ -432,25 +580,64 @@ function M.onSave(ctx)
 
 	local reserve = clampInt(ui.config.consumption_warning_percentage, RESERVE_MIN, RESERVE_MAX, 35)
 	local activeProfile = clampInt(ui.config.selectedBatteryProfile, PROFILE_MIN, PROFILE_MAX, PROFILE_MIN)
+	-- True where the profile shown is one the page can stand behind: either the pilot picked it
+	-- on this page, or a source answered for it. Otherwise it is the combo's fallback and says
+	-- nothing about the board.
+	local profileKnown = ui.profileDirty or resolveProfile(session, batteryConfig) ~= nil
 	local activeCapacity = clampInt(ui.config.capacities[activeProfile + 1], CAPACITY_MIN, CAPACITY_MAX, 0)
 
-	batteryConfig.batteryCellCount = clampInt(ui.config.batteryCellCount, CELL_COUNT_MIN, CELL_COUNT_MAX, 0)
-	batteryConfig.vbatmaxcellvoltage = clampInt(ui.config.vbatmaxcellvoltage, 250, 500, 420)
-	batteryConfig.vbatfullcellvoltage = clampInt(ui.config.vbatfullcellvoltage, 250, 500, 410)
-	batteryConfig.vbatwarningcellvoltage = clampInt(ui.config.vbatwarningcellvoltage, 250, 500, 350)
-	batteryConfig.vbatmincellvoltage = clampInt(ui.config.vbatmincellvoltage, 250, 500, 330)
-	batteryConfig.consumptionWarningPercentage = reserve
-	batteryConfig.batteryProfile = activeProfile
+	local profileCells = ui.config.profileCells
+	if profileCells then
+		for f = 1, #CELL_FIELDS do
+			local field = CELL_FIELDS[f]
+			for i = 0, 5 do
+				batteryConfig[field .. "_" .. tostring(i)] = profileCells[field][i + 1]
+			end
+		end
+	else
+		batteryConfig.batteryCellCount = clampInt(ui.config.batteryCellCount, CELL_COUNT_MIN, CELL_COUNT_MAX, 0)
+		batteryConfig.vbatmaxcellvoltage = clampInt(ui.config.vbatmaxcellvoltage, 250, 500, 420)
+		batteryConfig.vbatfullcellvoltage = clampInt(ui.config.vbatfullcellvoltage, 250, 500, 410)
+		batteryConfig.vbatwarningcellvoltage = clampInt(ui.config.vbatwarningcellvoltage, 250, 500, 350)
+		batteryConfig.vbatmincellvoltage = clampInt(ui.config.vbatmincellvoltage, 250, 500, 330)
+	end
+	-- Fix for issue #52: only overwrite consumptionWarningPercentage in batteryConfig
+	-- when the pilot explicitly edited the Consumption reserve spinner.
+	-- If unedited, preserve the existing FC value; if batteryConfig has no value yet,
+	-- populate from ui.config so we never write 0 to the FC.
+	if ui.reserveDirty then
+		batteryConfig.consumptionWarningPercentage = reserve
+	elseif batteryConfig.consumptionWarningPercentage == nil then
+		batteryConfig.consumptionWarningPercentage = reserve
+	end
 	for i = 0, 5 do
 		batteryConfig["batteryCapacity_" .. tostring(i)] = clampInt(ui.config.capacities[i + 1], CAPACITY_MIN, CAPACITY_MAX, 0)
 	end
-	batteryConfig.batteryCapacity = activeCapacity
-
-	session.activeBatteryType = activeProfile
+	-- All three of these name the active profile, so none may be set from the combo's fallback.
+	-- batteryCapacity is the active profile's capacity: the read filled it from the board, and
+	-- replacing it with the capacity of a guessed profile makes the session copy describe a
+	-- profile the board is not running. It costs nothing on the wire either way, because
+	-- MSP_SET_BATTERY_CONFIG writes its first field into the board's own active slot and the
+	-- six capacities at the tail of the same payload then overwrite all of them.
+	if profileKnown then
+		batteryConfig.batteryProfile = activeProfile
+		batteryConfig.batteryCapacity = activeCapacity
+		session.activeBatteryType = activeProfile
+		-- The single fields describe the active profile, as the board reports them.
+		if profileCells then
+			for f = 1, #CELL_FIELDS do
+				local field = CELL_FIELDS[f]
+				batteryConfig[field] = profileCells[field][activeProfile + 1]
+			end
+		end
+	end
 	session.battery_config = batteryConfig
 	session.batteryConfig = batteryConfig
 
-	batteryPrefs.consumption_warning_percentage = reserve
+	-- Only persist the reserve preference when the pilot explicitly changed it.
+	if ui.reserveDirty then
+		batteryPrefs.consumption_warning_percentage = reserve
+	end
 	local okPrefs, errPrefs = saveModelPreferences(session)
 
 	local okMsp = false
@@ -459,7 +646,11 @@ function M.onSave(ctx)
 		local queue = mspState and mspState.queue
 		if queue and type(queue.add) == "function" then
 			okMsp = true
-			if BatteryProfileApi and type(BatteryProfileApi.buildWritePayload) == "function" then
+			-- Only send the profile where the pilot selected one on this page. The page cannot
+			-- read the active profile back from the flight controller, so sending the combo's
+			-- fallback switches the board to profile 1 on every save made on a setup with no
+			-- BATTERY_PROFILE sensor, and M.eepromWrite makes that permanent.
+			if ui.profileDirty and BatteryProfileApi and type(BatteryProfileApi.buildWritePayload) == "function" then
 				queue:add({
 					command = BatteryProfileApi.writeCommand,
 					payload = BatteryProfileApi.buildWritePayload({ batteryProfile = activeProfile }),
@@ -489,24 +680,25 @@ function M.onSave(ctx)
 		end
 	end
 
-	if lvgl and lvgl.alert then
+	if ctx and type(ctx.reportSave) == "function" then
 		if okMsp and okPrefs then
-			lvgl.alert({
+			ctx.reportSave({
+				ok = true,
 				title = pageText(ctx and ctx.i18n, "saved_title", "Saved"),
 				message = pageText(ctx and ctx.i18n, "saved_message", "Battery settings saved")
 			})
 		elseif okMsp and not okPrefs then
-			lvgl.alert({
+			ctx.reportSave({
 				title = pageText(ctx and ctx.i18n, "warning_title", "Warning"),
 				message = "Battery values sent to FC. Model prefs save failed: " .. tostring(errPrefs or "io")
 			})
 		elseif (not okMsp) and okPrefs then
-			lvgl.alert({
+			ctx.reportSave({
 				title = pageText(ctx and ctx.i18n, "warning_title", "Warning"),
 				message = pageText(ctx and ctx.i18n, "saved_local_only_message", "Saved locally; FC write pending")
 			})
 		else
-			lvgl.alert({
+			ctx.reportSave({
 				title = pageText(ctx and ctx.i18n, "warning_title", "Warning"),
 				message = "FC write pending and model prefs save failed: " .. tostring(errPrefs or "io")
 			})
@@ -514,6 +706,8 @@ function M.onSave(ctx)
 	end
 
 	ui.dirty = false
+	ui.reserveDirty = false
+	ui.profileDirty = false
 	ui.runtime.lastSessionSignature = buildSessionSignature()
 	return true
 end
@@ -589,11 +783,25 @@ function M.build(ctx)
 	Controls.appendStaticSectionHeader(children, x, cursorY, w, pageText(i18n, "section_battery", "Battery"))
 	cursorY = cursorY + Controls.STATIC_SECTION_H
 
+	-- Only where the board keeps the rows below per profile; elsewhere they apply to every profile
+	-- and there is nothing to choose.
+	if ui.config.profileCells then
+		cursorY = cursorY + Controls.appendComboSelect(children, x, cursorY, w,
+			pageText(i18n, "edit_battery", "Edit Battery"),
+			profileOptions,
+			editSlot() - 1,
+			getEditProfileSetter(), {
+				helpText = optionalPageHelpText(i18n, "help_edit_battery"),
+				helpTitle = pageText(i18n, "edit_battery", "Edit Battery"),
+				onHelp = getInlineHelpHandler()
+			})
+	end
+
 	cursorY = cursorY + Controls.appendNumberField(children, x, cursorY, w,
 		pageText(i18n, "max_cell_voltage", "Max cell voltage"), {
 			min = 250,
 			max = 500,
-			get = function() return ui.config.vbatmaxcellvoltage end,
+			get = function() return cellValue("vbatmaxcellvoltage") end,
 			set = getMaxCellSetter(),
 			helpText = optionalPageHelpText(i18n, "help_max_cell_voltage"),
 			helpTitle = pageText(i18n, "max_cell_voltage", "Max cell voltage"),
@@ -605,7 +813,7 @@ function M.build(ctx)
 		pageText(i18n, "full_cell_voltage", "Full cell voltage"), {
 			min = 250,
 			max = 500,
-			get = function() return ui.config.vbatfullcellvoltage end,
+			get = function() return cellValue("vbatfullcellvoltage") end,
 			set = getFullCellSetter(),
 			helpText = optionalPageHelpText(i18n, "help_full_cell_voltage"),
 			helpTitle = pageText(i18n, "full_cell_voltage", "Full cell voltage"),
@@ -617,7 +825,7 @@ function M.build(ctx)
 		pageText(i18n, "warn_cell_voltage", "Warn cell voltage"), {
 			min = 250,
 			max = 500,
-			get = function() return ui.config.vbatwarningcellvoltage end,
+			get = function() return cellValue("vbatwarningcellvoltage") end,
 			set = getWarnCellSetter(),
 			helpText = optionalPageHelpText(i18n, "help_warn_cell_voltage"),
 			helpTitle = pageText(i18n, "warn_cell_voltage", "Warn cell voltage"),
@@ -629,7 +837,7 @@ function M.build(ctx)
 		pageText(i18n, "min_cell_voltage", "Min cell voltage"), {
 			min = 250,
 			max = 500,
-			get = function() return ui.config.vbatmincellvoltage end,
+			get = function() return cellValue("vbatmincellvoltage") end,
 			set = getMinCellSetter(),
 			helpText = optionalPageHelpText(i18n, "help_min_cell_voltage"),
 			helpTitle = pageText(i18n, "min_cell_voltage", "Min cell voltage"),
@@ -641,7 +849,7 @@ function M.build(ctx)
 		pageText(i18n, "cell_count", "Cell count"), {
 			min = CELL_COUNT_MIN,
 			max = CELL_COUNT_MAX,
-			get = function() return ui.config.batteryCellCount end,
+			get = function() return cellValue("batteryCellCount") end,
 			set = getCellCountSetter(),
 			helpText = optionalPageHelpText(i18n, "help_cell_count"),
 			helpTitle = pageText(i18n, "cell_count", "Cell count"),
@@ -686,6 +894,9 @@ function M.onClose()
 		ui.loaded = false
 		ui.dirty = false
 	end
+	ui.reserveDirty = false
+	ui.profileDirty = false
+	ui.config.editBatteryProfile = nil
 	ui.loading = false
 	ui.progress = 0
 	Controls = nil
@@ -695,6 +906,7 @@ function M.onClose()
 	BatteryConfigApi = nil
 	BatteryProfileApi = nil
 	Sensors = nil
+	SmartFuelReserve = nil
 	t = nil
 end
 

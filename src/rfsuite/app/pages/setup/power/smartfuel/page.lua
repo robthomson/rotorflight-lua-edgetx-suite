@@ -116,13 +116,13 @@ end
 
 local function logDebug(message)
 	if Log and type(Log.emit) == "function" then
-		pcall(Log.emit, "rfsuite.smartfuel.page", tostring(message), "debug", true)
+		pcall(Log.emit, "rfsuite.smartfuel.page", tostring(message), "debug")
 	end
 end
 
 local function logWarn(message)
 	if Log and type(Log.emit) == "function" then
-		pcall(Log.emit, "rfsuite.smartfuel.page", tostring(message), "warn", true)
+		pcall(Log.emit, "rfsuite.smartfuel.page", tostring(message), "warn")
 	end
 end
 
@@ -131,10 +131,6 @@ local function pageText(i18n, key, fallback)
 		return t(i18n, key, fallback)
 	end
 	return fallback
-end
-
-local function pageHelpText(i18n, key, fallback)
-	return pageText(i18n, key, fallback)
 end
 
 local function markDirty()
@@ -257,7 +253,7 @@ local function queueSmartfuelRead()
 			if type(session) == "table" then
 				local parsed = api.parse and api.parse(buf) or nil
 				if type(parsed) == "table" then
-					session.smartfuel_config = parsed.parsed or parsed
+					session.smartfuel_config = parsed
 					if type(session.battery_config) == "table" then
 						session.battery_config.smartfuelRemoteSource = tonumber(session.smartfuel_config.smartfuel_mode) or 0
 					end
@@ -363,9 +359,6 @@ function M.getHeaderActions()
 	}
 end
 
-function M.allowMemAutoRefresh()
-	return true
-end
 
 function M.onReload()
 	ensureDeps()
@@ -411,17 +404,17 @@ function M.onSave(ctx)
 
 	local okMsp, errMsp = queueSmartfuelWrite(session)
 
-	if lvgl and lvgl.alert then
+	if ctx and type(ctx.reportSave) == "function" then
 		if okMsp and okPrefs then
 			local savedTitle = pageText(ctx and ctx.i18n, "saved_title", "Saved")
 			local savedMessage = pageText(ctx and ctx.i18n, "saved_message", "SmartFuel settings saved")
-			lvgl.alert({ title = savedTitle, message = savedMessage })
+			ctx.reportSave({ ok = true, title = savedTitle, message = savedMessage })
 		elseif okMsp and not okPrefs then
-			lvgl.alert({ title = "Warning", message = "SmartFuel values sent to FC. Model prefs save failed: " .. tostring(errPrefs or "io") })
+			ctx.reportSave({ title = "Warning", message = "SmartFuel values sent to FC. Model prefs save failed: " .. tostring(errPrefs or "io") })
 		elseif (not okMsp) and okPrefs then
-			lvgl.alert({ title = "Warning", message = "Saved local SmartFuel values. FC write pending: " .. tostring(errMsp or "msp") })
+			ctx.reportSave({ title = "Warning", message = "Saved local SmartFuel values. FC write pending: " .. tostring(errMsp or "msp") })
 		else
-			lvgl.alert({ title = "Warning", message = "FC write pending and model prefs save failed: " .. tostring(errPrefs or "io") })
+			ctx.reportSave({ title = "Warning", message = "FC write pending and model prefs save failed: " .. tostring(errPrefs or "io") })
 		end
 	end
 
@@ -547,7 +540,7 @@ function M.build(ctx)
 			ui.config.firmware_mode,
 			getFirmwareModeSetter(),
 			{
-				helpText = pageHelpText(i18n, "help_firmware_mode", "Choose whether firmware SmartFuel is disabled, voltage-estimated, current consumption based, or combined. Combined uses the more pessimistic of voltage and current consumption."),
+				helpText = pageText(i18n, "help_firmware_mode", "Choose whether firmware SmartFuel is disabled, voltage-estimated, current consumption based, or combined. Combined uses the more pessimistic of voltage and current consumption."),
 				helpTitle = pageText(i18n, "firmware_mode", "Firmware Source"),
 				onHelp = getInlineHelpHandler()
 			}
@@ -562,7 +555,7 @@ function M.build(ctx)
 			ui.config.local_source,
 			getLocalSourceSetter(),
 			{
-				helpText = pageHelpText(i18n, "help_local_mode", "Choose whether local SmartFuel uses current consumption, pack voltage, or combined mode. Combined uses the more pessimistic of voltage and current consumption."),
+				helpText = pageText(i18n, "help_local_mode", "Choose whether local SmartFuel uses current consumption, pack voltage, or combined mode. Combined uses the more pessimistic of voltage and current consumption."),
 				helpTitle = pageText(i18n, "local_mode", "Local Source"),
 				onHelp = getInlineHelpHandler()
 			}
@@ -580,7 +573,7 @@ function M.build(ctx)
 			get = function() return ui.config.voltage_drop_rate end,
 			set = getVoltageSetter(),
 			enabled = isTuningEnabled,
-			helpText = pageHelpText(i18n, "help_voltage_drop_rate", "Limits how quickly filtered voltage may fall in voltage mode to reduce brief load-sag spikes affecting SmartFuel."),
+			helpText = pageText(i18n, "help_voltage_drop_rate", "Limits how quickly filtered voltage may fall in voltage mode to reduce brief load-sag spikes affecting SmartFuel."),
 			helpTitle = pageText(i18n, "voltage_drop_rate", "Voltage drop rate"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return tostring(v) .. " mV/s" end
@@ -593,7 +586,7 @@ function M.build(ctx)
 			get = function() return ui.config.charge_drop_rate end,
 			set = getChargeSetter(),
 			enabled = isTuningEnabled,
-			helpText = pageHelpText(i18n, "help_charge_drop_rate", "Maximum rate the reported SmartFuel value may recover in voltage mode after load is reduced."),
+			helpText = pageText(i18n, "help_charge_drop_rate", "Maximum rate the reported SmartFuel value may recover in voltage mode after load is reduced."),
 			helpTitle = pageText(i18n, "charge_drop_rate", "Charge drop rate"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v)
@@ -609,7 +602,7 @@ function M.build(ctx)
 			get = function() return ui.config.sag_gain end,
 			set = getSagSetter(),
 			enabled = isTuningEnabled,
-			helpText = pageHelpText(i18n, "help_sag_gain", "Strength of load-sag compensation in voltage mode. Higher values compensate more aggressively."),
+			helpText = pageText(i18n, "help_sag_gain", "Strength of load-sag compensation in voltage mode. Higher values compensate more aggressively."),
 			helpTitle = pageText(i18n, "sag_gain", "Sag gain"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return tostring(v) .. "%" end

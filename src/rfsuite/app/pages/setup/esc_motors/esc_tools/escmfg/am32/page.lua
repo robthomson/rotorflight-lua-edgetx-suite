@@ -15,6 +15,8 @@ local MspRuntime = nil
 local EscParametersAm32Api = nil
 local LoadingOverlay = nil
 local ConfirmDialog = nil
+local Am32Init = nil
+local EscCurrentLimit = nil
 local t = nil
 
 local ui = {
@@ -60,6 +62,9 @@ local ui = {
   },
   currentSection = 1,
   parsedCache = nil,
+  escModel = nil,
+  escVersion = nil,
+  escFirmware = nil,
   runtime = {
     readPending = false,
     requestRebuild = nil,
@@ -69,6 +74,12 @@ local ui = {
   saving = false,
   progress = 0
 }
+
+-- The page's own initial values, kept so that leaving the page can put them back.
+-- `ui` is module state and the module outlives the page, so without this a second
+-- visit whose read does not arrive would show what the previous ESC answered.
+local CONFIG_DEFAULTS = {}
+for k, v in pairs(ui.config) do CONFIG_DEFAULTS[k] = v end
 
 local function getSession()
   local root = _G and _G.rfsuite
@@ -82,6 +93,8 @@ local function ensureDeps()
   if not EscParametersAm32Api then EscParametersAm32Api = loadModule("tasks/msp/api/esc_parameters_am32.lua") end
   if not LoadingOverlay then LoadingOverlay = loadModule("ui/loading_overlay.lua") end
   if not ConfirmDialog then ConfirmDialog = loadModule("ui/confirm_dialog.lua") end
+  if not Am32Init then Am32Init = loadModule("app/pages/setup/esc_motors/esc_tools/escmfg/am32/init.lua") end
+  if not EscCurrentLimit then EscCurrentLimit = loadModule("app/pages/setup/esc_motors/esc_tools/esc_current_limit.lua") end
   if not t then t = Common and Common.pageT("setup_esc_motors") or nil end
 
   if type(ui.runtime) ~= "table" then
@@ -129,11 +142,27 @@ local function queueAm32ReadActual(queue)
 
         ui.parsedCache = parsed
 
+        local escModel = Am32Init and type(Am32Init.getEscModel) == "function" and Am32Init.getEscModel(buf) or nil
+        local escVersion = Am32Init and type(Am32Init.getEscVersion) == "function" and Am32Init.getEscVersion(buf) or nil
+        local escFirmware = Am32Init and type(Am32Init.getEscFirmware) == "function" and Am32Init.getEscFirmware(buf) or nil
+
+        ui.escModel = escModel
+        ui.escVersion = escVersion
+        ui.escFirmware = escFirmware
+
         local session = getSession()
+        -- Amps as they stand: the block carries the limit in whole amps (the API module doubles
+        -- the byte the ESC sends), so nothing is converted here.
+        if session and EscCurrentLimit then
+          EscCurrentLimit.remember(session, ui.config.current_limit)
+        end
         if session then
           session.setup_esc_motors_esc_tools_am32 = {
             config = {},
-            parsedCache = ui.parsedCache
+            parsedCache = ui.parsedCache,
+            escModel = escModel,
+            escVersion = escVersion,
+            escFirmware = escFirmware
           }
           for k, v in pairs(ui.config) do
             session.setup_esc_motors_esc_tools_am32.config[k] = v
@@ -172,6 +201,13 @@ local function queueAm32Read(isAutoReload)
 
   if ui.runtime.readPending then return true, nil end
 
+  -- The block held from an earlier read belongs to whatever answered then. Drop it
+  -- as the next read starts, so a reply that is refused, or that never arrives,
+  -- cannot leave a save to be built from the previous ESC's block. The four-way
+  -- connect sequence re-enters this function once per step and the block is only
+  -- assigned at the end of it, so clearing here also covers the seconds between an
+  -- ESC Target change and the read that follows it.
+  ui.parsedCache = nil
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -260,6 +296,8 @@ local function queuePostSaveReset(target, nextState)
 
   queue:add({
     command = FwdProgApi.writeCommand,
+    timeout = 5,
+    maxRetries = 1,
     payload = FwdProgApi.buildWritePayload({ target = target }),
     isWrite = true,
     simulatorResponse = {},
@@ -273,12 +311,23 @@ local function queuePostSaveReset(target, nextState)
     errorHandler = function()
       ui.connState = 5
       ui.saving = false
+      ui.notice = {
+        title = pageText(ui.i18n, "save_failed_title", "Save Failed"),
+        message = pageText(ui.i18n, "save_failed_message", "ESC did not respond / write timed out.")
+      }
       if ui.runtime and type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
       end
     end
   })
 end
+
+-- `M.onSave` passes the reason string straight into the report dialog, so a reason that is an
+-- ordinary situation has to be a translated key, not a code token. An AM32 save without a
+-- read is exactly that: an ESC that did not answer, or a page saved before the read came back.
+local MESSAGE_KEYS = {
+  esc_not_read = { "save_error_not_read", "Read the ESC before saving." }
+}
 
 local function queueAm32Write(requestRebuild)
   if not MspRuntime or not EscParametersAm32Api or type(MspRuntime.getState) ~= "function" then
@@ -289,6 +338,13 @@ local function queueAm32Write(requestRebuild)
   local queue = mspState and mspState.queue
   if not queue or type(queue.add) ~= "function" then
     return false, "msp_queue_unavailable"
+  end
+
+  -- The AM32 write is the whole fifty-byte block, not the changed fields, so it can only be
+  -- built from a block that was read. Without one, every field the page does not itself
+  -- carry would be packed as zero and written to the ESC.
+  if not ui.parsedCache then
+    return false, "esc_not_read"
   end
 
   local writeData = {}
@@ -309,7 +365,8 @@ local function queueAm32Write(requestRebuild)
 
   queue:add({
     command = EscParametersAm32Api.writeCommand,
-    timeout = 15,
+    timeout = 5,
+    maxRetries = 1,
     payload = EscParametersAm32Api.buildWritePayload(writeData),
     isWrite = true,
     processReply = function(self, buf)
@@ -322,6 +379,10 @@ local function queueAm32Write(requestRebuild)
     end,
     errorHandler = function()
       ui.saving = false
+      ui.notice = {
+        title = pageText(ui.i18n, "save_failed_title", "Save Failed"),
+        message = pageText(ui.i18n, "save_failed_message", "ESC did not respond / write timed out.")
+      }
       if requestRebuild and type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
       end
@@ -345,6 +406,9 @@ local function loadFromSession()
       end
     end
     ui.parsedCache = cached.parsedCache
+    ui.escModel = cached.escModel
+    ui.escVersion = cached.escVersion
+    ui.escFirmware = cached.escFirmware
     return true
   end
   return false
@@ -353,7 +417,7 @@ end
 local function log(msg, level)
   local Log = loadModule("lib/log.lua")
   if Log and type(Log.emit) == "function" then
-    Log.emit("rfsuite.am32", msg, level or "debug", true)
+    Log.emit("rfsuite.am32", msg, level or "debug")
   end
 end
 
@@ -437,33 +501,17 @@ local function ensureLoaded()
   ui.dirty = false
   ui.runtime.lastSessionSignature = buildSessionSignature()
   
-  local warningTitle = pageText(nil, "safety_warning_title", "Safety Warning")
-  local warningMsg = pageText(nil, "remove_blades_warning", "Please remove main and tail blades before configuring the ESC!")
-
-  if lvgl then
-    if type(lvgl.message) == "function" then
-      pcall(lvgl.message, {
-        title = warningTitle,
-        message = warningMsg
-      })
-    elseif type(lvgl.alert) == "function" then
-      pcall(lvgl.alert, {
-        title = warningTitle,
-        message = warningMsg
-      })
-    end
-  end
+  -- The safety warning is raised from HERE, which is inside the page build. A native
+  -- lvgl.message raised there cannot be closed by a hardware key: Layer::push gives the
+  -- dialog an empty LVGL group, but the same build goes on creating this page's objects
+  -- afterwards and they land in it, so EXIT is delivered to a widget behind the modal. It
+  -- is now the tool's own notice box, drawn into the page's own child list and dismissed
+  -- by its own button -- which also keeps the tool's run loop reachable while it stands.
+  ui.notice = {
+    title = pageText(nil, "safety_warning_title", "Safety Warning"),
+    message = pageText(nil, "remove_blades_warning", "Please remove main and tail blades before configuring the ESC!")
+  }
   queueAm32Read(false)
-end
-
-function M.onLoad()
-  ensureDeps()
-  ensureLoaded()
-end
-
-function M.onActivate()
-  ensureDeps()
-  ensureLoaded()
 end
 
 function M.wakeup(ctx)
@@ -471,7 +519,6 @@ function M.wakeup(ctx)
   ensureLoaded()
   
   ui.runtime.requestRebuild = ctx and ctx.requestRebuild or nil
-  ui.runtime.syncHeaderTitle = ctx and ctx.syncHeaderTitle or nil
 
   local signature = buildSessionSignature()
   if signature ~= ui.runtime.lastSessionSignature then
@@ -530,10 +577,15 @@ end
 function M.onSave(ctx)
   local ok, err = queueAm32Write(ctx and ctx.requestRebuild)
   if not ok then
-    if lvgl and lvgl.alert then
-      lvgl.alert({
+    if ctx and type(ctx.reportSave) == "function" then
+      local mapped = MESSAGE_KEYS[err]
+      local message = tostring(err or "MSP write failed")
+      if mapped then
+        message = pageText(ctx and ctx.i18n, mapped[1], mapped[2])
+      end
+      ctx.reportSave({
         title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
-        message = tostring(err or "MSP write failed")
+        message = message
       })
     end
     return false
@@ -554,7 +606,7 @@ function M.build(ctx)
   ensureLoaded()
 
   ui.runtime.requestRebuild = ctx and ctx.requestRebuild or nil
-  ui.runtime.syncHeaderTitle = ctx and ctx.syncHeaderTitle or nil
+  ui.i18n = ctx and ctx.i18n or nil
 
   local children = ctx.children
   local x = ctx.x
@@ -566,6 +618,21 @@ function M.build(ctx)
   local title = "AM32 Configurator"
   if type(ui.runtime.syncHeaderTitle) == "function" then
     ui.runtime.syncHeaderTitle(title, M.getHeaderActions())
+  end
+
+  if ui.notice and LoadingOverlay and type(LoadingOverlay.appendNotice) == "function" then
+    LoadingOverlay.appendNotice(children, {
+      x = x, y = y, w = w, h = h,
+      title = ui.notice.title,
+      message = ui.notice.message,
+      press = function()
+        ui.notice = nil
+        if type(ui.runtime.requestRebuild) == "function" then
+          ui.runtime.requestRebuild()
+        end
+      end
+    })
+    return
   end
 
   if ui.loading or ui.saving then
@@ -584,9 +651,22 @@ function M.build(ctx)
 
   local cursorY = y
   if Controls and type(Controls.appendStaticSectionHeader) == "function" then
-    Controls.appendStaticSectionHeader(children, x, cursorY, w, title)
+    local headerTitle = title
+    if ui.escModel and ui.escModel ~= "" and ui.escModel ~= title then
+      if string.find(string.lower(ui.escModel), string.lower(title), 1, true) then
+        headerTitle = ui.escModel
+      else
+        headerTitle = title .. " - " .. ui.escModel
+      end
+    end
+    Controls.appendStaticSectionHeader(children, x, cursorY, w, headerTitle)
     cursorY = cursorY + (Controls.STATIC_SECTION_H or 50)
   end
+
+  if Controls and type(Controls.appendEscSubheader) == "function" then
+    cursorY = cursorY + Controls.appendEscSubheader(children, x, cursorY, w, ui.escFirmware, ui.escVersion)
+  end
+  local rowH
   local hasMultipleEscs = (ui.motorCount == nil) or (ui.motorCount >= 2)
   if hasMultipleEscs then
     local escOptions = {
@@ -594,7 +674,8 @@ function M.build(ctx)
       { value = 1, label = "ESC 2" }
     }
     local escTargetVal = ui.escTarget or 0
-    local rowH = Controls.appendComboSelect(children, x, cursorY, w, "ESC Target", escOptions, escTargetVal, function(val)
+    local targetLabel = pageText(i18n, "esc_target", "ESC Target")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, targetLabel, escOptions, escTargetVal, function(val)
       local targetVal = tonumber(val) or 0
       if ui.escTarget ~= targetVal then
         ui.escTarget = targetVal
@@ -613,8 +694,13 @@ function M.build(ctx)
     { value = 2, label = "Advanced" },
     { value = 3, label = "Limits" }
   }
-  rowH = Controls.appendComboSelect(children, x, cursorY, w, "Section", sectionOptions, ui.currentSection, function(val)
+  local sectionLabel = pageText(i18n, "esc_section", "Section")
+  rowH = Controls.appendComboSelect(children, x, cursorY, w, sectionLabel, sectionOptions, ui.currentSection, function(val)
     ui.currentSection = val
+    -- The section is the whole of the session signature, and `M.wakeup` compares that signature
+    -- on the next tick. Recording it here means the rebuild requested below is the only one:
+    -- without it the wakeup sees a change nobody else made and asks for a second, identical build.
+    ui.runtime.lastSessionSignature = tostring(ui.currentSection)
     if type(ui.runtime.requestRebuild) == "function" then
       ui.runtime.requestRebuild()
     end
@@ -623,9 +709,6 @@ function M.build(ctx)
 
   local function markDirty()
     ui.dirty = true
-    if type(ui.runtime.requestRebuild) == "function" then
-      ui.runtime.requestRebuild()
-    end
   end
 
   if ui.currentSection == 1 then
@@ -634,13 +717,14 @@ function M.build(ctx)
       { value = 0, label = "Normal" },
       { value = 1, label = "Reversed" }
     }
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Motor Direction", dirOpts, ui.config.motor_direction, function(val)
+    local motorDirectionLabel = pageText(i18n, "esc_motor_direction", "Motor Direction")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, motorDirectionLabel, dirOpts, ui.config.motor_direction, function(val)
       ui.config.motor_direction = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Motor KV", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_motor_kv", "Motor KV"), {
       min = 20, max = 10220, step = 40, suffix = "KV",
       get = function() return ui.config.motor_kv end,
       set = function(val)
@@ -650,7 +734,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Motor Poles", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_motor_poles", "Motor Poles"), {
       min = 2, max = 36, step = 1,
       get = function() return ui.config.motor_poles end,
       set = function(val)
@@ -660,7 +744,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Startup Power", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_startup_power", "Startup Power"), {
       min = 50, max = 150, step = 1, suffix = "%",
       get = function() return ui.config.startup_power end,
       set = function(val)
@@ -675,13 +759,14 @@ function M.build(ctx)
       { value = 1, label = "Brake" },
       { value = 2, label = "Active" }
     }
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Brake on Stop", brakeOpts, ui.config.brake_on_stop, function(val)
+    local brakeOnStopLabel = pageText(i18n, "esc_brake_on_stop", "Brake on Stop")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, brakeOnStopLabel, brakeOpts, ui.config.brake_on_stop, function(val)
       ui.config.brake_on_stop = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Brake Strength", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_brake_strength", "Brake Strength"), {
       min = 0, max = 10, step = 1,
       get = function() return ui.config.brake_strength end,
       set = function(val)
@@ -691,7 +776,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Running Brake Level", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_running_brake_level", "Running Brake Level"), {
       min = 0, max = 10, step = 1,
       get = function() return ui.config.running_brake_level end,
       set = function(val)
@@ -701,7 +786,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Beep Volume", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_beep_volume", "Beep Volume"), {
       min = 0, max = 11, step = 1,
       get = function() return ui.config.beep_volume end,
       set = function(val)
@@ -718,19 +803,22 @@ function M.build(ctx)
       { value = 1, label = "On" }
     }
     
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Bidirectional Mode", offOnOpts, ui.config.bidirectional_mode, function(val)
+    local bidirectionalMode = pageText(i18n, "esc_bidirectional_mode", "Bidirectional Mode")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, bidirectionalMode, offOnOpts, ui.config.bidirectional_mode, function(val)
       ui.config.bidirectional_mode = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Sinusoidal Startup", offOnOpts, ui.config.sinusoidal_startup, function(val)
+    local sinusoidalStartup = pageText(i18n, "esc_sinusoidal_startup", "Sinusoidal Startup")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, sinusoidalStartup, offOnOpts, ui.config.sinusoidal_startup, function(val)
       ui.config.sinusoidal_startup = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Complementary PWM", offOnOpts, ui.config.complementary_pwm, function(val)
+    local complementaryPwmLabel = pageText(i18n, "esc_complementary_pwm", "Complementary PWM")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, complementaryPwmLabel, offOnOpts, ui.config.complementary_pwm, function(val)
       ui.config.complementary_pwm = val
       markDirty()
     end)
@@ -741,13 +829,13 @@ function M.build(ctx)
       { value = 1, label = "Variable" },
       { value = 2, label = "RPM" }
     }
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Variable PWM Frequency", varPwmOpts, ui.config.variable_pwm_frequency, function(val)
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, pageText(i18n, "esc_variable_pwm_frequency", "Variable PWM Frequency"), varPwmOpts, ui.config.variable_pwm_frequency, function(val)
       ui.config.variable_pwm_frequency = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Stuck Rotor Protection", offOnOpts, ui.config.stuck_rotor_protection, function(val)
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, pageText(i18n, "esc_stuck_rotor_protection", "Stuck Rotor Protection"), offOnOpts, ui.config.stuck_rotor_protection, function(val)
       ui.config.stuck_rotor_protection = val
       markDirty()
     end)
@@ -759,13 +847,14 @@ function M.build(ctx)
       { value = 2, label = "15°" },
       { value = 3, label = "22.5°" }
     }
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Timing Advance", timingOpts, ui.config.timing_advance, function(val)
+    local timingAdvanceLabel = pageText(i18n, "esc_timing_advance", "Timing Advance")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, timingAdvanceLabel, timingOpts, ui.config.timing_advance, function(val)
       ui.config.timing_advance = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "PWM Frequency", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_pwm_frequency", "PWM Frequency"), {
       min = 8, max = 144, step = 1, suffix = "kHz",
       get = function() return ui.config.pwm_frequency end,
       set = function(val)
@@ -775,31 +864,35 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Stall Protection", offOnOpts, ui.config.stall_protection, function(val)
+    local stallProtectionLabel = pageText(i18n, "esc_stall_protection", "Stall Protection")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, stallProtectionLabel, offOnOpts, ui.config.stall_protection, function(val)
       ui.config.stall_protection = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Interval Telemetry", offOnOpts, ui.config.interval_telemetry, function(val)
+    local intervalTelemetry = pageText(i18n, "esc_interval_telemetry", "Interval Telemetry")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, intervalTelemetry, offOnOpts, ui.config.interval_telemetry, function(val)
       ui.config.interval_telemetry = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "RC Car Reversing", offOnOpts, ui.config.rc_car_reversing, function(val)
+    local rcCarReversingLabel = pageText(i18n, "esc_rc_car_reversing", "RC Car Reversing")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, rcCarReversingLabel, offOnOpts, ui.config.rc_car_reversing, function(val)
       ui.config.rc_car_reversing = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Use Hall Sensors", offOnOpts, ui.config.use_hall_sensors, function(val)
+    local useHallSensorsLabel = pageText(i18n, "esc_use_hall_sensors", "Use Hall Sensors")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, useHallSensorsLabel, offOnOpts, ui.config.use_hall_sensors, function(val)
       ui.config.use_hall_sensors = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Sine Mode Range", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_sine_mode_range", "Sine Mode Range"), {
       min = 5, max = 25, step = 1,
       get = function() return ui.config.sine_mode_range end,
       set = function(val)
@@ -809,7 +902,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Sine Mode Power", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_sine_mode_power", "Sine Mode Power"), {
       min = 1, max = 10, step = 1,
       get = function() return ui.config.sine_mode_power end,
       set = function(val)
@@ -819,7 +912,8 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Auto Advance", offOnOpts, ui.config.auto_advance, function(val)
+    local autoAdvanceLabel = pageText(i18n, "esc_auto_advance", "Auto Advance")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, autoAdvanceLabel, offOnOpts, ui.config.auto_advance, function(val)
       ui.config.auto_advance = val
       markDirty()
     end)
@@ -827,7 +921,7 @@ function M.build(ctx)
 
   elseif ui.currentSection == 3 then
     -- Limits Settings
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Servo Low Threshold", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_servo_low_threshold", "Servo Low Threshold"), {
       min = 750, max = 1250, step = 2, suffix = "us",
       get = function() return ui.config.servo_low_threshold end,
       set = function(val)
@@ -837,7 +931,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Servo High Threshold", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_servo_high_threshold", "Servo High Threshold"), {
       min = 1750, max = 2250, step = 2, suffix = "us",
       get = function() return ui.config.servo_high_threshold end,
       set = function(val)
@@ -847,7 +941,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Servo Neutral", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_servo_neutral", "Servo Neutral"), {
       min = 1374, max = 1630, step = 1, suffix = "us",
       get = function() return ui.config.servo_neutral end,
       set = function(val)
@@ -857,7 +951,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Servo Dead Band", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_servo_dead_band", "Servo Dead Band"), {
       min = 0, max = 100, step = 1,
       get = function() return ui.config.servo_dead_band end,
       set = function(val)
@@ -872,13 +966,14 @@ function M.build(ctx)
       { value = 1, label = "Cell" },
       { value = 2, label = "Absolute" }
     }
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "Low Voltage Cutoff", lvcOpts, ui.config.low_voltage_cutoff, function(val)
+    local lowVoltageCutoffLabel = pageText(i18n, "esc_low_voltage_cutoff", "Low Voltage Cutoff")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, lowVoltageCutoffLabel, lvcOpts, ui.config.low_voltage_cutoff, function(val)
       ui.config.low_voltage_cutoff = val
       markDirty()
     end)
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Low Voltage Threshold", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_low_voltage_threshold", "Low Voltage Threshold"), {
       min = 250, max = 350, step = 1, suffix = "cV",
       get = function() return ui.config.low_voltage_threshold end,
       set = function(val)
@@ -888,7 +983,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Temperature Limit", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_temperature_limit", "Temperature Limit"), {
       min = 70, max = 141, step = 1, suffix = "C",
       get = function() return ui.config.temperature_limit end,
       set = function(val)
@@ -898,7 +993,7 @@ function M.build(ctx)
     })
     cursorY = cursorY + rowH
 
-    rowH = Controls.appendNumberField(children, x, cursorY, w, "Current Limit", {
+    rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_current_limit", "Current Limit"), {
       min = 0, max = 202, step = 2,
       get = function() return ui.config.current_limit end,
       set = function(val)
@@ -915,22 +1010,25 @@ function M.build(ctx)
       { value = 3, label = "Serial" },
       { value = 4, label = "BF Safe Arming" }
     }
-    rowH = Controls.appendComboSelect(children, x, cursorY, w, "ESC Protocol", protoOpts, ui.config.esc_protocol, function(val)
+    local protocolLabel = pageText(i18n, "esc_protocol", "ESC Protocol")
+    rowH = Controls.appendComboSelect(children, x, cursorY, w, protocolLabel, protoOpts, ui.config.esc_protocol, function(val)
       ui.config.esc_protocol = val
       markDirty()
     end)
     cursorY = cursorY + rowH
   end
 
-  if ui.dirty then
-    children[#children + 1] = {
-      type = "label",
-      x = x + 16, y = cursorY + 10,
-      text = pageText(i18n, "unsaved_changes", "Unsaved changes"),
-      color = COLOR_THEME_SECONDARY1,
-      font = SMLSIZE
-    }
-  end
+  -- The label is built once and reads the flag itself, so a change that sets the flag
+  -- does not have to replace the scene to show it. The text is resolved here rather
+  -- than inside the closure: the closure runs on every refresh, the lookup need not.
+  local unsavedText = pageText(i18n, "unsaved_changes", "Unsaved changes")
+  children[#children + 1] = {
+    type = "label",
+    x = x + 16, y = cursorY + 10,
+    text = function() return ui.dirty and unsavedText or "" end,
+    color = COLOR_THEME_SECONDARY1,
+    font = SMLSIZE
+  }
 end
 
 function M.onClose()
@@ -957,6 +1055,18 @@ function M.onClose()
   ui.motorCount = nil
   ui.motorConfigRetryPending = nil
   ui.motorConfigRetryTimer = nil
+  -- Everything the last reply left behind. The page module outlives its own close,
+  -- so without this the next visit would show that ESC's values, firmware and name --
+  -- and could save them -- even when its own read does not arrive. `escTarget` above
+  -- is already cleared and starts again at 0, so the block left here need not even
+  -- belong to the ESC the next visit addresses.
+  ui.parsedCache = nil
+  ui.escModel = nil
+  ui.escVersion = nil
+  ui.escFirmware = nil
+  for k, v in pairs(CONFIG_DEFAULTS) do ui.config[k] = v end
+  local closingSession = getSession()
+  if closingSession then closingSession.setup_esc_motors_esc_tools_am32 = nil end
   if Common and type(Common.resetPageState) == "function" then
     Common.resetPageState(ui, {
       resetLoaded = true,
@@ -969,6 +1079,8 @@ function M.onClose()
   EscParametersAm32Api = nil
   LoadingOverlay = nil
   ConfirmDialog = nil
+  Am32Init = nil
+  EscCurrentLimit = nil
   t = nil
 end
 

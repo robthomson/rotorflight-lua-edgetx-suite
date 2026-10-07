@@ -14,13 +14,58 @@ local FIELD_SPEC = {
     {"serial_number","U32"}, {"unknown_1","U16"}, {"stick_zero_us","U16"}, {"stick_range_us","U16"},
     {"unknown_2","U16"}, {"motor_poll_pairs","U16"}, {"pinion_teeth","U16"}, {"main_teeth","U16"},
     {"min_start_power","U16"}, {"max_start_power","U16"}, {"unknown_3","U16"}, {"flags","U8"},
-    {"unknown_4","U8"}, {"current_limit","U16"}
+    {"unknown_4","U8"}, {"current_limit","U16"},
+    -- The last eight bytes of the block. Their meaning is unknown here, as it is in the older
+    -- suite this layout comes from -- but they are part of what the ESC sends and of what it
+    -- expects back. The firmware sizes the payload as 2 + 2 * N from the parameter count the
+    -- ESC reports in the first U16, and this fixture reports 32, so the block is 66 bytes.
+    -- Without these a write is eight bytes short and the firmware reads past its end.
+    {"unknown_5","U32"}, {"unknown_6","U32"}
 }
 
+-- 66 bytes, matching the field spec above. The previous fixture was 52: it left three U16s out
+-- of the middle of the block -- startup response, cutoff cell voltage and active freewheel --
+-- so every field from `acceleration` onwards decoded the value belonging to a later one.
+-- `auto_restart_time` came out as 848, which is the esc_type, and `cell_cutoff` as 38019,
+-- which is half of a firmware version.
 local SIM_RESPONSE = {
-    165,0,32,0, 3,0, 55,0, 0,0, 4,0, 3,0, 1,0, 1,0, 80,3, 131,148,1,0, 30,170,0,0, 3,0, 86,4, 22,3, 163,15,
-    1,0, 2,0, 2,0, 20,0, 20,0, 0,0, 0, 0, 2,19
+    165,0,  32,0,  3,0,  55,0,  0,0,  0,0,  4,0,  3,0,  1,0,  1,0,  2,0,  3,0,  80,3,
+    131,148,1,0,  30,170,0,0,
+    3,0,  86,4,  22,3,  163,15,  1,0,  2,0,  2,0,  20,0,  20,0,  0,0,
+    0,  0,  2,19,
+    2,0,20,0,  22,0,0,0
 }
+
+-- The motor timing word is not the position of the entry the page offers. The ESC spells the
+-- four automatic modes 16..19 and the six fixed advance angles 1..6, with 0 a second spelling
+-- of the first automatic mode; 7..15 and everything above 19 are not values it defines. The
+-- page works in list positions, so the word is decoded on the way in and encoded again on the
+-- way out. The two tables are deliberately not each other's inverse: reading folds both 0 and
+-- 16 onto the first automatic mode, writing spells that mode 0.
+local MOTOR_TIMING_TO_UI = {
+    [0] = 0, [1] = 4, [2] = 5, [3] = 6, [4] = 7, [5] = 8, [6] = 9,
+    [16] = 0, [17] = 1, [18] = 2, [19] = 3
+}
+
+local MOTOR_TIMING_FROM_UI = {
+    [0] = 0, [1] = 17, [2] = 18, [3] = 19, [4] = 1,
+    [5] = 2, [6] = 3, [7] = 4, [8] = 5, [9] = 6
+}
+
+local function motor_timing_to_ui(raw)
+    return MOTOR_TIMING_TO_UI[raw] or 0
+end
+
+local function motor_timing_from_ui(value, raw)
+    -- A field still standing on the entry the ESC's own word was decoded to writes that word
+    -- back rather than the canonical spelling of the same entry, so a save that changed
+    -- nothing changes nothing in the ESC. The table is indexed rather than decoded here on
+    -- purpose: an undefined word decodes to the first automatic mode like everything else the
+    -- ESC does not define, and keeping it would mean a pilot who deliberately picks that mode
+    -- leaves the undefined word in place on a page that says he changed it.
+    if raw ~= nil and MOTOR_TIMING_TO_UI[raw] == value then return raw end
+    return MOTOR_TIMING_FROM_UI[value] or 0
+end
 
 local TYPE_LEN = {U8=1,S8=1,U16=2,S16=2,U24=3,U32=4,U64=8,U120=15,U128=16}
 
@@ -68,6 +113,14 @@ Api.simulatorResponse = SIM_RESPONSE
 
 function Api.parse(buf)
     if type(buf)~='table' then return nil end
+    -- The flight controller puts the ESC family it detected in the first byte of the block.
+    -- A reply from another family decodes into this layout without error, the page adopts it
+    -- as the ESC's state, and a save writes it back; refuse it instead, which the caller
+    -- already treats as 'no data'.
+    -- There is no length test to go with it: an OpenYGE block is two header bytes plus two
+    -- per parameter, sized from the count the ESC itself reports, so a shorter reply is a
+    -- smaller ESC rather than a truncated one.
+    if tonumber(buf[1]) ~= Api.mspSignature then return nil end
     local pos=1; local out={}
     for _, f in ipairs(FIELD_SPEC) do
         local name, typ = f[1], f[2]
@@ -76,6 +129,8 @@ function Api.parse(buf)
         elseif string.sub(typ, 1, 1)=='S' then out[name]=read_signed(buf,pos,len,big); pos=pos+len
         else out[name]=read_unsigned(buf,pos,len,big); pos=pos+len end
     end
+    out.timing_raw = out.timing
+    out.timing = motor_timing_to_ui(out.timing)
     return out
 end
 
@@ -84,6 +139,7 @@ function Api.buildWritePayload(data)
     for _, f in ipairs(FIELD_SPEC) do
         local name, typ = f[1], f[2]; local len = TYPE_LEN[typ] or 1; local big = has_big_flag(f)
         local v = data[name]
+        if name=='timing' then v = motor_timing_from_ui(v, data.timing_raw) end
         if typ=='U120' or typ=='U128' then local b=pack_string(v,len); for _,x in ipairs(b) do payload[#payload+1]=x end
         else local b=pack_unsigned(v or 0,len,big); for _,x in ipairs(b) do payload[#payload+1]=x end end
     end

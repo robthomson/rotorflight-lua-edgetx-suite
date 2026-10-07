@@ -21,7 +21,8 @@ end
 
 local function loadModule(path)
   local fullPath = "/SCRIPTS/TOOLS/rfsuite-core/" .. path
-  local chunk = loadScript(fullPath, "t")
+  local mode = (_G.rfsuite and _G.rfsuite.loadMode) or "bt"
+  local chunk = loadScript(fullPath, mode)
   if type(chunk) ~= "function" then return nil end
   local ok, mod = pcall(chunk)
   if not ok then return nil end

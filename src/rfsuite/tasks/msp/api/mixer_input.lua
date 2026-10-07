@@ -1,4 +1,6 @@
 -- Ported MIXER_INPUT -> mixer_input.lua
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 local Api = {
     command = 170,
     writeCommand = 171

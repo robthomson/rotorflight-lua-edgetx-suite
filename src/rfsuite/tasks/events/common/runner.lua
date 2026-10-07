@@ -2,17 +2,35 @@
 -- Supports shared state between Tool and Widget contexts
 local M = {}
 
+-- This has to stay ABOVE the give-up of anything a task puts on the MSP queue, or the runner
+-- re-queues a task whose request is still in flight and the queue ends up holding two copies of
+-- the same read. The queue's own give-up is (maxRetries + 1) x the message timeout, and its
+-- transport-wide maxRetries is 5 on CRSF -- so a 5 s read there ran for 30 s against this 25 s.
+-- The connect reads now carry a maxRetries of their own for exactly this reason.
 local DEFAULT_TASK_TIMEOUT_SECONDS = 25
 local MAX_RETRIES = 3
 local RETRY_BACKOFF_SECONDS = 1
 
 local function loadModule(path)
   local fullPath = "/SCRIPTS/TOOLS/rfsuite-core/" .. path
-  local chunk = loadScript(fullPath, "t")
+  local mode = (_G.rfsuite and _G.rfsuite.loadMode) or "bt"
+  local chunk = loadScript(fullPath, mode)
   if type(chunk) ~= "function" then return nil end
   local ok, mod = pcall(chunk)
   if not ok then return nil end
   return mod
+end
+
+-- getTime() is hundredths of a second since boot and is always available; the os
+-- library is not opened by the Lua state at all, so os.clock() alone leaves `now`
+-- at 0 and every elapsed-time test below reads as "no time has passed".
+local function nowSeconds()
+  if type(getTime) == "function" then
+    local ok, v = pcall(getTime)
+    if ok and type(v) == "number" then return v / 100 end
+  end
+  if type(os) == "table" and type(os.clock) == "function" then return os.clock() end
+  return 0
 end
 
 function M.new(category)
@@ -25,8 +43,26 @@ function M.new(category)
   local tasksLoaded = false
   local tasksDoneLogged = false
 
+  -- What the queries below answer -- the next task to run, and the done/total/failed/pending
+  -- counts -- can only change when a task is marked complete or failed, when the queue is reset
+  -- or loaded, or when the context asking changes. Once the chain is through, the dashboard asks
+  -- all three on every logic tick and the events wakeup asks `active()` twice more around its own
+  -- `wakeup()`, and each of those walked a queue whose answer could not have moved. One walk now
+  -- serves all of them: `view` is dropped wherever a task's state changes, and it carries the
+  -- context it was taken for, so a different context walks again.
+  local view = nil
+
+  local function invalidateView()
+    view = nil
+  end
+
+  local function readOnly()
+    error("onconnect progress is read-only", 2)
+  end
+
   local Log = nil
   local Env = nil
+  local lastStartedTask = nil
 
   local function ensureEnv()
     if not Env then Env = loadModule("lib/env.lua") end
@@ -34,15 +70,16 @@ function M.new(category)
 
   local function loadManifest()
     if Log == nil then Log = loadModule("lib/log.lua") or false end
-    local chunk = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. MANIFEST_PATH, "t")
+    local mode = (_G.rfsuite and _G.rfsuite.loadMode) or "bt"
+    local chunk = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. MANIFEST_PATH, mode)
     if type(chunk) ~= "function" then
-      if type(Log) == "table" and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "manifest missing: " .. tostring(MANIFEST_PATH), "debug", true) end
+      if type(Log) == "table" and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "manifest missing: " .. tostring(MANIFEST_PATH), "debug") end
       tasksLoaded = true
       return
     end
     local ok, manifest = pcall(chunk)
     if not ok or type(manifest) ~= "table" then
-      if type(Log) == "table" and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "invalid manifest: " .. tostring(MANIFEST_PATH), "debug", true) end
+      if type(Log) == "table" and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "invalid manifest: " .. tostring(MANIFEST_PATH), "debug") end
       tasksLoaded = true
       return
     end
@@ -85,12 +122,13 @@ function M.new(category)
   local function ensureTaskModule(task)
     if not task or not task.path then return nil, "invalid task" end
     if task.module then return task.module end
-    local chunk, err = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. task.path, "t")
+    local mode = (_G.rfsuite and _G.rfsuite.loadMode) or "bt"
+    local chunk, err = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. task.path, mode)
     if type(chunk) ~= "function" then
       -- Fallback to common path if not already using it and local load failed
       if not string.find(task.path, COMMON_PATH, 1, true) then
         local commonPath = COMMON_PATH .. task.name .. ".lua"
-        chunk, err = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. commonPath, "t")
+        chunk, err = loadScript("/SCRIPTS/TOOLS/rfsuite-core/" .. commonPath, mode)
       end
     end
 
@@ -120,33 +158,61 @@ function M.new(category)
       t.startTime = nil
     end
     tasksDoneLogged = false
+    invalidateView()
   end
 
-  local function findNextEligibleTask(currentEnv)
+  local function isEligible(t, currentEnv)
+    if t.context == "both" then return true end
+    if t.context == "tool" and currentEnv == "tool" then return true end
+    if t.context == "widget" and currentEnv == "widget" then return true end
+    return false
+  end
+
+  -- The next eligible task and the progress counts, off one walk. `progress` is shared by every
+  -- caller until the next walk, so it is handed out as a read-only proxy: one caller's write must
+  -- not become the next reader's answer. A `__newindex` on the table itself would not catch it,
+  -- because Lua overwrites a key that is already there without consulting the hook. A change
+  -- builds a new table; it never edits the one a caller may still hold.
+  local function queueView(currentEnv)
+    local v = view
+    if v and v.env == currentEnv then return v end
+    local total = 0
+    local done = 0
+    local failed = 0
+    local nextTask = nil
     for i = 1, #tasksQueue do
       local t = tasksQueue[i]
-      if not t.complete and not t.failed then
-        local eligible = false
-        if t.context == "both" then
-          eligible = true
-        elseif t.context == "tool" and currentEnv == "tool" then
-          eligible = true
-        elseif t.context == "widget" and currentEnv == "widget" then
-          eligible = true
-        end
-
-        if eligible then
-          return t, i
+      if isEligible(t, currentEnv) then
+        total = total + 1
+        if t.complete or t.failed then
+          done = done + 1
+          if t.failed then failed = failed + 1 end
+        elseif nextTask == nil then
+          nextTask = t
         end
       end
     end
-    return nil
+    local pending = nil
+    if nextTask and type(nextTask.name) == "string" and nextTask.name ~= "" then
+      pending = nextTask.name
+    end
+    v = {
+      env = currentEnv,
+      task = nextTask,
+      progress = setmetatable({}, {
+        __index = { done = done, total = total, failed = failed, pending = pending },
+        __newindex = readOnly,
+      }),
+    }
+    view = v
+    return v
   end
 
   function runner.findTasks()
     if tasksLoaded then return end
     clearTaskEntries()
     loadManifest()
+    invalidateView()
   end
 
   function runner.resetAllTasks()
@@ -164,17 +230,17 @@ function M.new(category)
 
     ensureEnv()
     local currentEnv = Env and Env.get() or "tool"
-    local task, idx = findNextEligibleTask(currentEnv)
+    local task = queueView(currentEnv).task
 
     if not task then
       if not tasksDoneLogged then
-        if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "all eligible " .. category .. " tasks complete for " .. currentEnv, "debug", true) end
+        if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "all eligible " .. category .. " tasks complete for " .. currentEnv, "debug") end
         tasksDoneLogged = true
       end
       return
     end
 
-    local now = (type(os) == "table" and type(os.clock) == "function") and os.clock() or 0
+    local now = nowSeconds()
 
     if task.nextEligibleAt and task.nextEligibleAt > now then return end
 
@@ -183,22 +249,44 @@ function M.new(category)
     local module, err = ensureTaskModule(task)
     if not module then
       task.failed = true
+      invalidateView()
       task.startTime = nil
       task.nextEligibleAt = 0
-      if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "failed to load task " .. tostring(task.name) .. ": " .. tostring(err or "?"), "info", true) end
+      if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "failed to load task " .. tostring(task.name) .. ": " .. tostring(err or "?"), "info") end
       return
     end
 
     if type(module.wakeup) == "function" then
+      -- Said BEFORE the call, and into the step file as well as the log. The runner reports
+      -- tasks it has finished; a task that never finishes is reported by nothing, and the
+      -- connect chain is where a start with a flight controller attached spends its time. The
+      -- step file is closed immediately, so it survives a wakeup that does not come back.
+      -- Only when the task CHANGES. wakeup runs once per pass and a task stays eligible until
+      -- it reports itself complete, so a line per call was a third of the file and said the
+      -- same thing thirty times. What a hang looks like is unaffected: the last name written
+      -- with no `completed` after it is the one that never returned, and the step file -- which
+      -- is rewritten every pass and carries a counter -- is where the repetition is visible.
+      if lastStartedTask ~= task.name then
+        lastStartedTask = task.name
+        if Log and type(Log.emitf) == "function" then
+          pcall(Log.emitf, "rfsuite.tasks." .. category, "debug", "start task %s attempt=%s",
+            tostring(task.name), tostring(task.attempts or 1))
+        end
+      end
+      local step = _G.rfsuite and _G.rfsuite.logStep
+      if type(step) == "function" then
+        pcall(step, "task " .. category .. ":" .. tostring(task.name))
+      end
       pcall(module.wakeup, args)
     end
 
     if module.isComplete and module.isComplete() then
       task.complete = true
+      invalidateView()
       task.startTime = nil
       task.nextEligibleAt = 0
       releaseTaskModule(task, false)
-      if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "completed task " .. tostring(task.name), "debug", true) end
+      if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, "completed task " .. tostring(task.name), "debug") end
       return
     end
 
@@ -210,12 +298,19 @@ function M.new(category)
         task.nextEligibleAt = now + backoff
         task.initialized = false
         task.startTime = nil
-        if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, string.format("Task '%s' timed out. Re-queueing (attempt %d/%d) in %.1fs.", task.name, task.attempts, MAX_RETRIES, backoff), "info", true) end
+        -- The module instance goes with the attempt, or the next one sends nothing. Every task
+        -- latches its request in a module-local flag and returns on its first line while that
+        -- flag is set, so a re-queue that kept the instance re-ran a wakeup that does nothing
+        -- and the line below announced work that never happened. Releasing it with its reset is
+        -- what the complete and the give-up branches around this one already do.
+        releaseTaskModule(task, true)
+        if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, string.format("Task '%s' timed out. Re-queueing (attempt %d/%d) in %.1fs.", task.name, task.attempts, MAX_RETRIES, backoff), "info") end
       else
         task.failed = true
+        invalidateView()
         task.startTime = nil
         releaseTaskModule(task, false)
-        if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, string.format("Task '%s' failed after %d attempts. Skipping.", task.name, MAX_RETRIES), "info", true) end
+        if Log and type(Log.emit) == "function" then pcall(Log.emit, "rfsuite.tasks." .. category, string.format("Task '%s' failed after %d attempts. Skipping.", task.name, MAX_RETRIES), "info") end
       end
     end
   end
@@ -223,42 +318,30 @@ function M.new(category)
   function runner.active()
     ensureEnv()
     local currentEnv = Env and Env.get() or "tool"
-    return findNextEligibleTask(currentEnv) ~= nil
+    return queueView(currentEnv).task ~= nil
   end
 
   function runner.getPendingTaskName()
     ensureEnv()
     local currentEnv = Env and Env.get() or "tool"
-    local task = findNextEligibleTask(currentEnv)
-    if task and type(task.name) == "string" and task.name ~= "" then
-      return task.name
-    end
-    return nil
+    return queueView(currentEnv).progress.pending
   end
 
+  -- `failed` and `pending` are reported beside the count.
+  --
+  -- A task that gave up counts towards `done`, because the queue has moved past it and the
+  -- chain is no longer waiting on it. That makes `done == total` mean "nothing is still
+  -- running" rather than "everything was read", and a caller reporting the chain as finished
+  -- had no way to learn the difference. `failed` is that difference.
+  --
+  -- `pending` is the same task getPendingTaskName() returns.
+  --
+  -- The table is the one the last walk built, and the same table is returned until a task's
+  -- state, the queue or the asking context changes. It is read-only: a write raises.
   function runner.getProgress()
     ensureEnv()
     local currentEnv = Env and Env.get() or "tool"
-    local total = 0
-    local done = 0
-    for i = 1, #tasksQueue do
-      local t = tasksQueue[i]
-      local eligible = false
-      if t.context == "both" then
-        eligible = true
-      elseif t.context == "tool" and currentEnv == "tool" then
-        eligible = true
-      elseif t.context == "widget" and currentEnv == "widget" then
-        eligible = true
-      end
-      if eligible then
-        total = total + 1
-        if t.complete or t.failed then
-          done = done + 1
-        end
-      end
-    end
-    return { done = done, total = total }
+    return queueView(currentEnv).progress
   end
 
   return runner

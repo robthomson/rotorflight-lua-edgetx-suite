@@ -7,7 +7,7 @@ local function loadModule(path)
   local ok, mod = pcall(chunk)
   if not ok then 
     if _G and _G.rfsuite and _G.rfsuite.Log then
-      _G.rfsuite.Log.emit("rfsuite.elrs", "loadModule pcall error: " .. tostring(mod), "error", true)
+      _G.rfsuite.Log.emit("rfsuite.elrs", "loadModule pcall error: " .. tostring(mod), "error")
     end
     return nil 
   end
@@ -16,6 +16,8 @@ end
 
 local Common = nil
 local ElrsTask = nil
+local ConfirmDialog = nil
+local Armed = nil
 local t = nil
 
 local state = {
@@ -43,20 +45,57 @@ local function nowSeconds()
   return 0
 end
 
+local LoadingOverlay = nil
+
 local function ensureDeps()
   if not Common then Common = loadModule("app/pages/settings/common.lua") end
   if not ElrsTask then 
     ElrsTask = loadModule("app/pages/tools/diagnostics/elrs_link/elrslink_task.lua") 
     if not ElrsTask and _G and _G.rfsuite and _G.rfsuite.Log then
-      _G.rfsuite.Log.emit("rfsuite.elrs", "Failed to load elrslink_task.lua", "error", true)
+      _G.rfsuite.Log.emit("rfsuite.elrs", "Failed to load elrslink_task.lua", "error")
     end
   end
   if not t then t = Common and Common.pageT("diagnostics_elrs_link") or nil end
+  if not LoadingOverlay then LoadingOverlay = loadModule("ui/loading_overlay.lua") end
+  if not ConfirmDialog then ConfirmDialog = loadModule("ui/confirm_dialog.lua") end
+  -- Through the suite's own module cache where there is one, rather than through this file's
+  -- loadModule: lib/armed.lua is a shared library and this page is dropped and rebuilt on every
+  -- close, so the local loader would read and compile it off the card again each time. The other
+  -- four above keep the local loader on purpose -- elrslink_task.lua carries module-level state
+  -- that the setup assistant drives separately, and sharing that is not this change's business.
+  if not Armed then
+    if _G.rfsuite and _G.rfsuite.require then
+      Armed = _G.rfsuite.require("lib/armed.lua")
+    else
+      Armed = loadModule("lib/armed.lua")
+    end
+    if type(Armed) ~= "table" and _G and _G.rfsuite and _G.rfsuite.Log then
+      _G.rfsuite.Log.emit("rfsuite.elrs", "Failed to load lib/armed.lua", "error")
+    end
+  end
 end
 
 local function pageText(i18n, key, fallback)
   local obj = i18n or state.i18n
   if t then return t(obj, key, fallback) end
+  return fallback
+end
+
+-- A string that is not this page's, by its whole key. The arming state a confirmation quotes is
+-- the tool's fact rather than this page's, so it is said in the words the header's own Save
+-- already uses instead of in a second wording that could drift away from it.
+--
+-- Named and shaped the way ui/home.lua names and shapes it, because the packager resolves
+-- `tr("key", "fallback")` at build time and leaves anything it does not recognise as the
+-- fallback -- which ships the English string in every locale with nothing going red.
+local function tr(key, fallback)
+  local obj = state.i18n
+  if obj and type(obj.t) == "function" then
+    local ok, value = pcall(obj.t, key)
+    if ok and type(value) == "string" and value ~= "" and value ~= key then
+      return value
+    end
+  end
   return fallback
 end
 
@@ -68,12 +107,12 @@ end
 local function log(msg, level)
   local rf = _G.rfsuite
   if rf and rf.Log and type(rf.Log.emit) == "function" then
-    rf.Log.emit("rfsuite.elrs.page", msg, level or "debug", true)
+    rf.Log.emit("rfsuite.elrs.page", msg, level or "debug")
   end
 end
 
-local function requestTelemetryConfig()
-  if state.fetchingConfig then return end
+local function requestTelemetryConfig(force)
+  if state.fetchingConfig and not force then return end
   local session = getSession()
   if not session or not session.isConnected then return end
   
@@ -85,7 +124,7 @@ local function requestTelemetryConfig()
     return 
   end
   
-  log("requestTelemetryConfig: requesting MSP 73")
+  log("requestTelemetryConfig: requesting MSP 73 (force=" .. tostring(force) .. ")")
   state.fetchingConfig = true
   mspState.queue:add({
     command = TelemetryApi.command,
@@ -103,6 +142,7 @@ local function requestTelemetryConfig()
         log("requestTelemetryConfig: successfully populated session config")
       end
       state.fetchingConfig = false
+      state.answered = true
       if type(state.requestRebuild) == "function" then state.requestRebuild() end
     end,
     errorHandler = function()
@@ -127,7 +167,9 @@ local function formatRotorflightSummary(i18n)
     end
 
     local modeLabel = fcConfig.mode == 0 and pageText(i18n, "mode_native", "Native") or pageText(i18n, "mode_custom", "Custom")
-    return "mode=" .. modeLabel .. ", rate=" .. tostring(fcConfig.linkRate) .. ", ratio=1:" .. tostring(fcConfig.linkRatio)
+    local rateLabel = (fcConfig.linkRate and fcConfig.linkRate > 0) and (tostring(fcConfig.linkRate) .. "Hz") or tostring(fcConfig.linkRate or "?")
+    local ratioLabel = (fcConfig.linkRatio and fcConfig.linkRatio > 0) and ("1:" .. tostring(fcConfig.linkRatio)) or tostring(fcConfig.linkRatio or "?")
+    return "mode=" .. modeLabel .. ", rate=" .. rateLabel .. ", ratio=" .. ratioLabel
 end
 
 local function formatElrsSummary(i18n)
@@ -137,8 +179,24 @@ local function formatElrsSummary(i18n)
         return pageText(i18n, "status_not_probed", "Not probed yet")
     end
 
-    local rateText = linkConfig.packetRateLabel or (linkConfig.packetRate and (tostring(linkConfig.packetRate) .. "Hz")) or "?"
-    local ratioText = linkConfig.telemetryRatioLabel or "?"
+    local rateText = linkConfig.packetRateLabel
+    if not rateText or rateText == "" then
+        if linkConfig.packetRate and linkConfig.packetRate > 0 then
+            rateText = tostring(linkConfig.packetRate) .. "Hz"
+        else
+            rateText = "?"
+        end
+    end
+
+    local ratioText = linkConfig.telemetryRatioLabel
+    if not ratioText or ratioText == "" then
+        if linkConfig.telemetryRatio and linkConfig.telemetryRatio > 0 then
+            ratioText = "1:" .. tostring(linkConfig.telemetryRatio)
+        else
+            ratioText = "?"
+        end
+    end
+
     return "rate=" .. tostring(rateText) .. ", ratio=" .. tostring(ratioText)
 end
 
@@ -152,12 +210,122 @@ local function actionModeLabel(i18n, mode)
     return pageText(i18n, "action_probe_only", "Probe only")
 end
 
+-- Whether a sync may be started at all, and it answers YES only on a clear no.
+--
+-- A guard in front of a write fails CLOSED, which is the rule lib/armed.lua states in its own
+-- words: "cannot tell" is not "safe to proceed". `Armed and Armed.isArmed()` reads the same and
+-- does the opposite -- a lib/armed.lua that is not on the card, or a loader that returned
+-- something that is not a module, would leave both write buttons exactly as they were before this
+-- page had a guard at all, and say nothing about it anywhere.
+local function armedRefusesTheWrite()
+  if type(Armed) ~= "table" or type(Armed.isArmed) ~= "function" then
+    return true
+  end
+  return Armed.isArmed() == true
+end
+
+-- The question a sync button asks, with both sides as the page already shows them.
+--
+-- The probe that makes the buttons live has read the module and the flight controller by the
+-- time either one can be pressed, so the question can quote them instead of asking in the
+-- abstract. It quotes the last read rather than the write: the sync re-walks the module before
+-- it decides what to send. Where a side was not read, its summary says so itself.
+local function syncQuestion(i18n, mode)
+  local lines = {}
+  if mode == ElrsTask.MODE_ROTORFLIGHT_TO_ELRS then
+    lines[#lines + 1] = pageText(i18n, "confirm_rf_to_elrs",
+      "Set the ELRS module's packet rate and telemetry ratio to match Rotorflight?")
+  else
+    lines[#lines + 1] = pageText(i18n, "confirm_elrs_to_rf",
+      "Set Rotorflight's telemetry configuration to match the ELRS module, and save it?")
+  end
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = pageText(i18n, "rotorflight", "Rotorflight")
+    .. ": " .. formatRotorflightSummary(i18n)
+  lines[#lines + 1] = pageText(i18n, "elrs_module", "ELRS Module")
+    .. ": " .. formatElrsSummary(i18n)
+  -- Where the arming state could not be read at all, the question says so rather than being
+  -- asked as if it had been checked. The header's Save does the same thing for the same reason:
+  -- "cannot tell" is not "disarmed", and the pilot is the only one who can settle it.
+  if type(Armed) == "table" and type(Armed.isUncertain) == "function" and Armed.isUncertain() then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = tr("app.dialogs.confirm_save_arm_unknown",
+      "Cannot read the arming state. Is the model disarmed?")
+  end
+  return table.concat(lines, "\n")
+end
+
+-- Ask before either sync writes, and write nothing at all if the answer does not arrive.
+--
+-- Both directions reach a live device: one changes the transmitter module's packet rate and
+-- telemetry ratio, on a radio that may be bound to a helicopter at the time; the other writes the
+-- flight controller's telemetry configuration and commits it to EEPROM. Neither is a reading, so
+-- neither is started from a bare press.
+local function startSync(i18n, mode)
+  if not ElrsTask then return end
+
+  local function rebuild()
+    if type(state.requestRebuild) == "function" then state.requestRebuild() end
+  end
+
+  -- Not while the craft is armed. The entry is locked against being ENTERED while armed, but a
+  -- page opened before the arming edge stays open across it and its buttons stay live, so the
+  -- press has to ask the question the menu asked earlier. The header's Save refuses on the same
+  -- predicate; this is the same refusal, one button over.
+  if armedRefusesTheWrite() then
+    state.notice = pageText(i18n, "status_unavailable_armed", "Unavailable while armed")
+    rebuild()
+    return
+  end
+
+  local shown = false
+  if ConfirmDialog and type(ConfirmDialog.show) == "function" then
+    shown = ConfirmDialog.show({
+      title = pageText(i18n, "confirm_title", "Confirm"),
+      message = syncQuestion(i18n, mode),
+      onConfirm = function()
+        -- The answer can arrive after the page has gone, and the task handle goes with it.
+        if not ElrsTask then return end
+        -- The question stands over an arbitrary number of ticks and the craft can be armed
+        -- under it, so the state is read again here rather than inherited from the press.
+        if armedRefusesTheWrite() then
+          state.notice = pageText(i18n, "status_unavailable_armed", "Unavailable while armed")
+          rebuild()
+          return
+        end
+        state.notice = nil
+        requestTelemetryConfig(true)
+        ElrsTask.start(mode)
+        rebuild()
+      end,
+      onCancel = function()
+        -- A declined sync changes nothing, and saying so is what keeps that apart from a button
+        -- that did not react.
+        state.notice = pageText(i18n, "confirm_cancelled", "Nothing was written")
+        rebuild()
+      end
+    })
+  end
+
+  if not shown then
+    -- No question could be put up, so there is no answer to act on. Neither write is something to
+    -- do on the assumption that the pilot would have said yes.
+    state.notice = pageText(i18n, "confirm_no_dialog", "This radio cannot show the confirmation.")
+    rebuild()
+  end
+end
+
 local function rebuildRows(i18n)
   if not ElrsTask then return false end
   
   local statusKey, statusDef = ElrsTask.getStatus()
   local status = pageText(i18n, statusKey, statusDef)
   local isRunning = ElrsTask.isRunning()
+  -- A declined or unanswerable confirmation leaves the task untouched, so its own status still
+  -- reads as the probe that ran before it. The notice is what tells the pilot nothing was
+  -- written. It stands only while nothing is running, so a task that starts for any reason
+  -- takes the row back rather than reporting underneath a stale line.
+  if state.notice and not isRunning then status = state.notice end
 
   local rows = {
     { label = pageText(i18n, "status", "Status"), value = status },
@@ -182,12 +350,8 @@ local function rebuildRows(i18n)
   return true
 end
 
-function M.getModuleTitle()
-  return "ELRS Telemetry"
-end
-
 function M.getHeaderActions()
-  return { reload = false, save = false, help = false }
+  return { reload = true, save = false, help = true }
 end
 
 function M.isPageOpen()
@@ -195,7 +359,12 @@ function M.isPageOpen()
 end
 
 function M.onReload()
-  return false
+  state.notice = nil
+  requestTelemetryConfig(true)
+  if ElrsTask then
+    ElrsTask.start(ElrsTask.MODE_PROBE)
+  end
+  return true
 end
 
 function M.build(ctx)
@@ -207,6 +376,7 @@ function M.build(ctx)
   
   if not state.loaded then
     state.loaded = true
+    requestTelemetryConfig(true)
   end
   
   rebuildRows(i18n)
@@ -215,6 +385,21 @@ function M.build(ctx)
   local x = ctx.x
   local y = ctx.y
   local w = ctx.w
+
+  -- Until the first reply lands there is nothing to draw but zeroes, and the host paints no
+  -- frame in front of a page -- so without this the page simply appears empty and the pilot
+  -- cannot tell a slow read from a page that has no data. Only the FIRST read is covered:
+  -- the page re-reads on demand, and an overlay on every re-read would flash.
+  if not state.answered and state.fetchingConfig and LoadingOverlay
+     and type(LoadingOverlay.append) == "function" then
+    LoadingOverlay.append(children, {
+      x = x, y = y, w = w, h = ctx.h,
+      title = pageText(i18n, "loading_title", "Loading"),
+      message = pageText(i18n, "loading_message", "Reading link configuration..."),
+      progress = 0.3
+    })
+    return
+  end
   local rowY = y + 6
   local rowH = 44
   local labelW = math.floor(w * 0.35)
@@ -277,7 +462,11 @@ function M.build(ctx)
       text = pageText(i18n, "action_probe", "Probe"),
       textColor = WHITE,
       active = buttonsEnabled,
-      press = function() ElrsTask.start(ElrsTask.MODE_PROBE) end
+      press = function()
+        state.notice = nil
+        requestTelemetryConfig(true)
+        ElrsTask.start(ElrsTask.MODE_PROBE)
+      end
     }
 
     -- RF -> ELRS
@@ -288,7 +477,9 @@ function M.build(ctx)
       text = pageText(i18n, "action_rf_to_elrs", "RF -> ELRS"),
       textColor = WHITE,
       active = buttonsEnabled,
-      press = function() ElrsTask.start(ElrsTask.MODE_ROTORFLIGHT_TO_ELRS) end
+      press = function()
+        startSync(i18n, ElrsTask.MODE_ROTORFLIGHT_TO_ELRS)
+      end
     }
 
     -- ELRS -> RF
@@ -299,7 +490,9 @@ function M.build(ctx)
       text = pageText(i18n, "action_elrs_to_rf", "ELRS -> RF"),
       textColor = WHITE,
       active = buttonsEnabled,
-      press = function() ElrsTask.start(ElrsTask.MODE_ELRS_TO_ROTORFLIGHT) end
+      press = function()
+        startSync(i18n, ElrsTask.MODE_ELRS_TO_ROTORFLIGHT)
+      end
     }
   end
 end
@@ -336,8 +529,13 @@ function M.closePage()
   state.lastRefreshAt = 0
   state.i18n = nil
   state.fetchingConfig = false
+  state.answered = false
+  state.notice = nil
+  LoadingOverlay = nil
   Common = nil
   ElrsTask = nil
+  ConfirmDialog = nil
+  Armed = nil
   t = nil
 end
 

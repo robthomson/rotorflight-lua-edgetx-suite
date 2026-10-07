@@ -1,4 +1,6 @@
 -- EdgeTX MSP API: VTXTABLE_POWERLEVEL (ported)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {
   command = 138,
@@ -47,7 +49,7 @@ function Api.parse(buf)
   parsed.label_1 = tonumber(buf[pos]) or 0; pos = pos + 1
   parsed.label_2 = tonumber(buf[pos]) or 0; pos = pos + 1
   parsed.label_3 = tonumber(buf[pos]) or 0; pos = pos + 1
-  return { parsed = parsed }
+  return parsed
 end
 
 function Api.buildWritePayload(data)

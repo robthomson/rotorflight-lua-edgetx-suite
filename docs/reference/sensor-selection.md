@@ -1,0 +1,140 @@
+---
+title: How a value finds its telemetry sensor
+sidebar_label: Sensor selection
+---
+
+# How a value finds its telemetry sensor
+
+The suite asks for values by what they are -- fuel, voltage, headspeed, current, link quality --
+and the radio holds telemetry sensors with four-character names. This page is what sits between
+the two: how a value is matched to one of the model's sensors, how long that choice lasts, and
+why a sensor the radio has never sent is not taken for a reading of zero.
+
+It applies everywhere a telemetry value is used: the dashboard widget, the audio announcements,
+the flight log and the flight record.
+
+## Choosing a sensor
+
+Each value has a list of sensor names, most preferred first -- fuel is looked for as `Bat%`,
+then `Fuel`, then `fuel`. The list is tried in order and the first name that answers is taken.
+That choice is then remembered, so later passes read the chosen sensor directly instead of
+searching again.
+
+Where a value has been matched to something other than the first name on its list, the first name
+is re-tried every few seconds, and the value moves back to it as soon as it starts answering.
+That covers a sensor which appears late -- the flight controller's own values arrive a moment
+after the link comes up, and two of them the suite publishes itself.
+
+A value the model carries no sensor for at all -- no altimeter, no BEC voltage, no ESC
+temperature -- would otherwise be searched for on every pass, for the whole flight. Those searches
+are spaced out instead: the first retry comes after about two seconds and the wait doubles up to
+half a minute.
+
+## Asking for a sensor by its own name
+
+Everything above is about the suite's own values, each with a list of names behind it. A name
+that is not one of those -- a flight controller sensor the suite has no value for, or one of the
+link statistics -- is read straight from the model's sensor of that name, and the same spacing
+applies: a name the model carries no sensor for is retried after about two seconds and then less
+and less often, not on every pass.
+
+Two things come with that.
+
+**The session minimum and maximum.** The radio keeps the lowest and the highest reading of every
+sensor, and offers them under the sensor's name with a trailing `-` or `+`: `Hspd+` is the
+highest headspeed, `RQly-` the worst link quality. They are the radio's figures rather than the
+suite's, so they cover everything received since the radio last reset telemetry -- when the model
+was loaded, when the radio was switched on, or on *Reset Telemetry* -- and not one flight.
+[Flight statistics](flight-statistics.md) are the per-flight ones. One oddity is worth knowing:
+on a **voltage** sensor the radio resets the minimum whenever a new maximum arrives, on the
+assumption that a higher voltage means a fresh battery.
+
+**The link statistics are the radio's sensors, not the flight controller's.** The CRSF driver
+creates them from the link frames themselves, so they are there on every model flown on a
+Crossfire or ELRS link, whether or not a flight controller is answering:
+
+| Name | Unit | What it is |
+| --- | --- | --- |
+| `1RSS`, `2RSS` | dBm | Signal strength at the receiver, per antenna. |
+| `RQly` | % | Link quality up to the aircraft -- the share of packets that arrived. |
+| `RSNR` | dB | Signal-to-noise ratio at the receiver. |
+| `ANT` | — | Which receiver antenna is active. |
+| `RFMD` | — | The RF mode, as the module's own number. |
+| `TPWR` | mW | Transmit power the module is using. |
+| `TRSS` | dBm | Signal strength of the downlink, at the radio. |
+| `TQly` | % | Link quality down from the aircraft. |
+| `TSNR` | dB | Signal-to-noise ratio at the radio. |
+| `RRSP`, `TRSP` | % | The two signal strengths again as percentages, where the module sends them. |
+| `RPWR` | dBm | The receiver's transmit power, where the module sends it. |
+| `TFPS` | Hz | Downlink frame rate, where the module sends it. |
+
+Which of them a model actually has is the module's decision and not the suite's; the last four
+come from extended frames that only some modules send. The units are those of EdgeTX 2.12.3 and
+later; 2.12.2 and earlier declared the three signal strengths in dB. The flight controller's own
+custom sensors are a separate set and are described under
+[telemetry sensors](telemetry-sensors.md).
+
+## Why a sensor the radio has never sent is not a reading of zero
+
+A model keeps the sensors it has ever seen. Load a model that flew with a sensor the radio is no
+longer receiving -- the value was switched off in the flight controller's telemetry set, an ESC
+that is not on the bus today, a receiver that has not been powered up -- and the row is still
+there in *Model* -> *Telemetry*, with nothing to say it is stale.
+
+Asked for such a row, the radio answers **zero**, not "no value". Zero is a perfectly good
+reading, so a stale row can be mistaken for a working sensor that happens to read nothing, and the
+value then stays at zero for as long as the model is loaded. For fuel that is the number the
+SmartFuel calculation publishes, the callouts speak and the flight log records.
+
+The suite therefore asks a second question of any sensor reading zero, and takes the reading only
+where the radio has actually received that sensor. A row that has never arrived is treated as
+missing rather than as zero.
+
+**What that question can and cannot separate.** It separates *"nothing has arrived for this sensor
+since the model was loaded"* from *"something has"*. It does **not** tell a sensor that fell silent
+a moment ago from one that is still arriving: a sensor which stops mid-flight keeps its last
+reading, and a link that drops does not undo what has already arrived. That is the radio's own
+behaviour, not something the suite can see behind.
+
+## What you will see
+
+- **The fuel callout** says nothing for a fuel row the radio is not sending, where it used to
+  announce 0 %.
+- **The flight log** leaves its minimum-fuel columns empty for such a flight instead of filling
+  them with a zero that was never measured.
+- **The dashboard is unchanged.** Every telemetry value it keeps starts at zero and is only
+  overwritten by a reading that arrived, so a value with no sensor behind it shows `0` there
+  before and after. Making those tiles show `--` is a separate gate and this is not it.
+
+## When the choice is made again
+
+The sensor chosen for a value is forgotten in three places, and it is worth knowing which,
+because they are not the same event:
+
+- **The dashboard widget** forgets the choice on its own link edges, so a session that begins
+  after a reconnect matches everything again from the top of its list. That matching is spread
+  over the first few reads -- normally no more than four values start their search in one pass,
+  and the arming state is not held back -- so after a reconnect the dashboard's values appear
+  over about two seconds rather than all on the first read, and somewhat later where other
+  readers in the same pass start searches of their own. The same applies when the widget starts.
+- **The configuration tool** forgets the choice on every audio tick (five times a second) for as
+  long as it does not consider the connection ready -- no link quality, no battery reading, or
+  no flight controller answering -- and so matches again from the top each time. Once it is
+  ready, the choice stays until that test fails again.
+- **The radio's own telemetry reset** -- which happens when a model is loaded, when the radio is
+  switched on, and on *Reset Telemetry* -- is what puts the sensor rows themselves back to "never
+  received". That is the event the zero test above is measured against.
+
+A link that merely drops does neither of those to the rows: what has already been received stays
+received until one of the resets above. So a model flown with a different ESC, or with a value
+switched on since, picks up the right sensor when it is next loaded rather than in the middle of
+a session.
+
+## Related
+
+- [No connection to the flight controller](../troubleshooting/no-connection.md) -- when nothing
+  off the flight controller is shown at all, rather than one value.
+- [Collecting logs](../troubleshooting/collecting-logs.md) -- the suite's log names the sensor
+  each value was matched to when the debug level is raised.
+- [Flight statistics](flight-statistics.md) -- what the flight record keeps, and which values it
+  reads through this layer.

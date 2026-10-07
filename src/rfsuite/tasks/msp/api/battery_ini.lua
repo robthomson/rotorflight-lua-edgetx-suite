@@ -1,4 +1,6 @@
 -- EdgeTX API: BATTERY_INI (minimal port)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {}
 
@@ -57,10 +59,10 @@ function Api.parse(buf)
         if parsed[name] then parsed[name] = parsed[name] end
       end
     end
-    return { parsed = parsed }
+    return parsed
   end
 
-  return { parsed = defaults() }
+  return defaults()
 end
 
 function Api.buildWritePayload(payloadData)

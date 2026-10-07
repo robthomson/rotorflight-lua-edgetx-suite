@@ -1,12 +1,15 @@
 -- EdgeTX MSP API: rpm_filter_v2 (ported from Ethos)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {
   command = 154,
   writeCommand = 155,
+  -- One axis: 16 notches of source (u8), center (u16) and Q (u8), which is what parse() reads.
   simulatorResponse = (function()
     local t = {}
     for i = 1, 16 do
-      t[#t+1] = 0; t[#t+1] = 0; t[#t+1] = 0
+      t[#t+1] = 0; t[#t+1] = 0; t[#t+1] = 0; t[#t+1] = 0
     end
     return t
   end)()
@@ -42,9 +45,13 @@ function Api.parse(buf)
   return parsed
 end
 
+-- MSP_SET_RPM_FILTER_V2 takes the axis first and then all 16 notches of that axis, 65 bytes in
+-- all; the firmware answers anything else with an error. The axis is taken the way the read takes
+-- it, from `data.axis`, and defaults to the same 0.
 function Api.buildWritePayload(data)
   data = data or {}
-  local p = {}
+  local axis = tonumber(data.axis) or 0
+  local p = {axis}
   for idx = 1, 16 do
     p[#p+1] = tonumber(data["notch_source_"..idx]) or 0
     local lo, hi = bytes_from_u16(data["notch_center_"..idx] or 0)

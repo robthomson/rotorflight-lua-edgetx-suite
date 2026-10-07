@@ -41,3 +41,131 @@ jobs:
           name: rfsuite-radio-install-v${{ env.GIT_VER }}_${{ matrix.lang }}
           path: rfsuite-radio-install-v${{ env.GIT_VER }}_${{ matrix.lang }}.zip
           if-no-files-found: error
+
+  instruction-budget:
+    name: Instruction budget
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Lua 5.3
+        run: sudo apt-get update && sudo apt-get install -y lua5.3
+
+      - name: Prove the gate can go red
+        run: lua5.3 bin/accounting/measure.lua --self-test
+
+      - name: Account instructions per pass
+        run: lua5.3 bin/accounting/measure.lua --check
+
+  i18n-precompiler:
+    name: i18n precompiler
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prove the checks can go red
+        run: python .vscode/scripts/test_precompile_i18n.py --self-test
+
+      - name: Precompile one page and compare
+        run: python .vscode/scripts/test_precompile_i18n.py
+
+  documentation-rule:
+    name: Documentation rule
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # the check diffs against the base commit, which a shallow clone does not carry
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prove the check can go red
+        run: python bin/docs/verify_documentation_rule.py --self-test
+
+      - name: Write the pull request body to a file
+        # through the environment, never interpolated into the script: a pull request
+        # body is text anybody can write
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$PR_BODY" > pr-body.txt
+
+      - name: Check the documentation rule
+        run: |
+          python bin/docs/verify_documentation_rule.py             --base '${{ github.event.pull_request.base.sha }}'             --body-file pr-body.txt
+
+  translation-coverage:
+    name: Translation coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prove the check can go red
+        run: python bin/i18n/check_translations.py --self-test
+
+      - name: Report the strings a locale build cannot translate
+        run: python bin/i18n/check_translations.py
+
+  i18n-resolver:
+    # Added because a resolver self-test that only ran in checks.yml reached
+    # master broken: the restore of the read-only case chmod-ed back to
+    # stat.S_IWRITE, which on POSIX leaves the file --w------- with no read
+    # bit, so the self-test's own read-back raised. It passed on Windows,
+    # where the same call only toggles the read-only attribute, and pr.yml did
+    # not run the step -- so the first run on any push was the failing one.
+    # A gate nobody watches on a pull request is not known to be a gate.
+    name: i18n resolver
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prove the resolver can report a failure
+        run: python .vscode/scripts/resolve_i18n_tags.py --self-test
+
+  erase-confirmation:
+    # The quick menu's ERASE BLACKBOX is irreversible and one tap from the flight line. The
+    # row carries a `confirm` and M.run holds its press behind it; this proves the whole path
+    # offline, and its self-test proves the checks go red for a row that erases without asking.
+    name: Erase confirmation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Lua 5.3
+        run: sudo apt-get update && sudo apt-get install -y lua5.3
+
+      - name: Prove the checks can go red
+        run: lua5.3 bin/dashboard/verify_erase_confirm.lua --self-test
+
+      - name: Check the erase asks before it erases
+        run: lua5.3 bin/dashboard/verify_erase_confirm.lua

@@ -11,6 +11,10 @@ end
 local Controls = loadModule("ui/controls.lua")
 local DashboardLib = loadModule("app/pages/settings/dashboard/lib.lua")
 
+-- The settings page loads this file for the theme it is configuring and hands that theme
+-- to the factory below, so a copy of this theme under rfsuite.user/dashboard stores its
+-- values under its own key prefix instead of this one's. The literal is the fallback for
+-- a caller that passes no theme.
 local THEME_PATH = "system/@aerc-n"
 local THEME_DEFAULTS = {
     rpm_min = 0,
@@ -44,10 +48,10 @@ end
 local function loadConfig(prefs)
     if ui.loaded then return end
 
-    local modelPrefs = nil
-    if type(_G) == "table" and _G.rfsuite and type(_G.rfsuite.session) == "table" then
-        modelPrefs = _G.rfsuite.session.modelPreferences
-    end
+    local session = type(_G) == "table" and _G.rfsuite and type(_G.rfsuite.session) == "table" and _G.rfsuite.session or nil
+    -- The per-model store is only addressable once the flight controller's id is known, so
+    -- the read is conditioned on it exactly as the save is.
+    local modelPrefs = session and session.mcu_id and session.modelPreferences or nil
 
     local cfg = DashboardLib.getThemeConfig(prefs, THEME_PATH, THEME_DEFAULTS, modelPrefs)
     
@@ -72,7 +76,10 @@ end
 
 local function saveConfig(prefs)
     local session = type(_G) == "table" and _G.rfsuite and type(_G.rfsuite.session) == "table" and _G.rfsuite.session or nil
-    local modelPrefs = session and session.modelPreferences
+    -- Where the values land is the settings page's scope, not this module's: the library
+    -- writes the radio's standard values, or this model's own ones, which need the flight
+    -- controller's id -- without it the model scope saves nothing.
+    local modelPrefs = session and session.mcu_id and session.modelPreferences or nil
 
     DashboardLib.setThemeConfig(prefs, THEME_PATH, {
         rpm_min = tonumber(ui.config.rpm_min) or THEME_DEFAULTS.rpm_min,
@@ -84,15 +91,25 @@ local function saveConfig(prefs)
         esctemp_max = tonumber(ui.config.esctemp_max) or THEME_DEFAULTS.esctemp_max,
     }, modelPrefs)
 
+    -- The model's file is written whenever a flight controller is connected, but it carries
+    -- this save's values only in the model scope: there its answer is what the save reports.
+    -- In the standard scope the values went into the radio's preferences, which the page's own
+    -- save writes, so a failure to rewrite the model's file is not a failure of this save.
+    local modelScope = type(DashboardLib.getEditScope) == "function" and DashboardLib.getEditScope() == "model"
     if session and session.mcu_id and modelPrefs then
         local loadMod = loadScript("/SCRIPTS/TOOLS/rfsuite-core/lib/model_preferences.lua", "t")
         if type(loadMod) == "function" then
             local ok, MP = pcall(loadMod)
             if ok and type(MP) == "table" and type(MP.saveByMcuId) == "function" then
-                MP.saveByMcuId(session.mcu_id, modelPrefs)
+                local saved, err = MP.saveByMcuId(session.mcu_id, modelPrefs)
+                if modelScope then return saved, err end
+                return true
             end
         end
+        -- saveByMcuId's own word for a store that will not load; onSave turns it into a sentence.
+        if modelScope then return false, "unavailable" end
     end
+    return true
 end
 
 local function getRpmMin()
@@ -157,9 +174,6 @@ function M.getHeaderActions()
     return { save = true, help = false }
 end
 
-function M.allowMemAutoRefresh()
-    return true
-end
 
 function M.onReload(ctx)
     ui.loaded = false
@@ -168,13 +182,31 @@ function M.onReload(ctx)
 end
 
 function M.onSave(ctx)
-    saveConfig(ctx.preferences)
+    local modelOk, modelErr = saveConfig(ctx.preferences)
     local ok, err = ctx.savePreferences()
-    if lvgl and lvgl.alert and not ok then
-        local i18n = ctx.i18n
-        local title = i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.save_error_title") or "Error"
-        local message = i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.save_error_message") or "Save failed"
-        lvgl.alert({ title = title, message = message .. ": " .. tostring(err or "io") })
+    -- Saved only when every store that carries this save's values was written. A store answers a
+    -- refused write with a token or with the card's own error text, which names the file's path;
+    -- the pilot reads the sentence the library maps either to.
+    if not ok then
+        err = DashboardLib.saveFailureReason(ctx.i18n, err)
+    elseif not modelOk then
+        ok, err = false, DashboardLib.saveFailureReason(ctx.i18n, modelErr, true)
+    end
+    if ok then
+        ui.dirty = false
+        if ctx and type(ctx.reportSave) == "function" then
+            local i18n = ctx.i18n
+            local title = i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.saved_title") or "Saved"
+            local message = i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.saved_message") or "Theme settings saved"
+            ctx.reportSave({ ok = true, title = title, message = message })
+        end
+    else
+        if ctx and type(ctx.reportSave) == "function" then
+            local i18n = ctx.i18n
+            local title = i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.save_error_title") or "Error"
+            local message = i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.save_error_message") or "Save failed"
+            ctx.reportSave({ title = title, message = message .. ": " .. err })
+        end
     end
     return true
 end
@@ -340,6 +372,12 @@ function M.build(ctx)
     return cursorY
 end
 
-return M
+return function(ctx)
+    local theme = ctx and ctx.theme
+    if type(theme) == "table" and type(theme.path) == "string" and theme.path ~= "" then
+        THEME_PATH = theme.path
+    end
+    return M
+end
 
 

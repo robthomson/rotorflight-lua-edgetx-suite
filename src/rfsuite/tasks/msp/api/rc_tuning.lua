@@ -32,9 +32,20 @@ local function to_u16(lo, hi)
     return ((hi & 0xFF) << 8) | (lo & 0xFF)
 end
 
-local function from_u16(v)
+-- Caps a value at the ceiling of the field it is about to be written into. The wire carries
+-- one byte for a U8 field and two for a U16, and masking a larger value silently turns it into
+-- an unrelated one -- 300 becomes 44, a rate the pilot never asked for. Capping keeps the
+-- nearest value the field can express. Every field below is read unsigned by the flight
+-- controller (MSP_SET_RC_TUNING in src/main/msp/msp.c), so flooring at zero cannot truncate a
+-- negative value that would have meant something.
+local function clamp_unsigned(v, ceiling)
     v = tonumber(v) or 0
-    v = v & 0xFFFF
+    if v < 0 then v = 0 elseif v > ceiling then v = ceiling end
+    return math.floor(v)
+end
+
+local function from_u16(v)
+    v = clamp_unsigned(v, 0xFFFF)
     return v & 0xFF, (v >> 8) & 0xFF
 end
 
@@ -76,9 +87,9 @@ function Api.buildWritePayload(data)
     for _, t in ipairs(FIELD_SPEC) do
         local name, typ = t[1], t[2]
         local val = data[name] or 0
-        if typ == "U8" then p[#p+1] = val & 0xFF
+        if typ == "U8" then p[#p+1] = clamp_unsigned(val, 0xFF)
         elseif typ == "U16" then local lo, hi = from_u16(val); p[#p+1] = lo; p[#p+1] = hi
-        else p[#p+1] = val & 0xFF end
+        else p[#p+1] = clamp_unsigned(val, 0xFF) end
     end
     return p
 end

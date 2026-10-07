@@ -10,23 +10,27 @@ local function loadModule(path)
   return mod
 end
 
-local function loadThemeConfig(configurePath)
-  local cached = loadedThemeConfigs[configurePath]
+-- Cached per scope as well as per file. A theme's module keeps the values it has read in its own
+-- upvalues, and running the file again is the only way to get a module that has read nothing, so
+-- the standard values and a model's overrides are never shown by the same copy.
+local function loadThemeConfig(configurePath, scope)
+  local cacheKey = configurePath .. "|" .. tostring(scope)
+  local cached = loadedThemeConfigs[cacheKey]
   if cached ~= nil then
     if cached == false then return nil end
     return cached
   end
   local ok, chunk = pcall(loadScript, configurePath, "t")
   if not ok or type(chunk) ~= "function" then
-    loadedThemeConfigs[configurePath] = false
+    loadedThemeConfigs[cacheKey] = false
     return nil
   end
   local loadedOk, loaded = pcall(chunk)
   if not loadedOk then
-    loadedThemeConfigs[configurePath] = false
+    loadedThemeConfigs[cacheKey] = false
     return nil
   end
-  loadedThemeConfigs[configurePath] = loaded
+  loadedThemeConfigs[cacheKey] = loaded
   return loaded
 end
 
@@ -40,6 +44,9 @@ local ui = {
   themes = nil,
   configurableThemes = nil,
   activeThemeConfigPath = nil,
+  activePageId = nil,
+  activeScope = nil,
+  activePage = nil,
   activeTheme = nil,
   activeModule = nil,
 }
@@ -74,13 +81,82 @@ local function hexDecode(input)
   return table.concat(out)
 end
 
+-- The menu id carries the theme, and for a theme that splits its settings it carries the page
+-- as well. The theme token is hexadecimal and so holds no underscore, which is what keeps the
+-- two apart however many underscores a page id has. Its prefix carries the scope: `settings_`
+-- edits the radio's standard values, `model_` the connected model's overrides.
+local MENU_SCOPES = {
+  { prefix = "^settings_dashboard_settings_", scope = "standard" },
+  { prefix = "^settings_dashboard_model_", scope = "model" },
+}
+
+-- The line naming the scope above the theme's own controls.
+local SCOPE_LABEL_H = 24
+
 local function themePathFromMenu(ctx)
   local menu = ctx and ctx.menu
   local menuId = menu and menu.getCurrentMenuId and menu.getCurrentMenuId() or nil
   if type(menuId) ~= "string" then return nil end
-  local token = string.match(menuId, "^settings_dashboard_settings_([0-9a-f]+)_page$")
-  if not token then return nil end
-  return hexDecode(token)
+
+  for i = 1, #MENU_SCOPES do
+    local entry = MENU_SCOPES[i]
+    local token = string.match(menuId, entry.prefix .. "([0-9a-f]+)_page$")
+    if token then return hexDecode(token), nil, entry.scope end
+
+    local pageToken, pageId = string.match(menuId, entry.prefix .. "([0-9a-f]+)_([a-z0-9_]+)_page$")
+    if pageToken then return hexDecode(pageToken), pageId, entry.scope end
+  end
+
+  return nil
+end
+
+local function connectedModelName()
+  local session = type(_G) == "table" and _G.rfsuite and _G.rfsuite.session or nil
+  if type(session) == "table" then
+    if type(session.modelName) == "string" and session.modelName ~= "" then
+      return session.modelName
+    end
+    local craft = type(session.modelPreferences) == "table" and session.modelPreferences.craft or nil
+    if type(craft) == "table" and type(craft.name) == "string" and craft.name ~= "" then
+      return craft.name
+    end
+  end
+  if type(model) == "table" and type(model.getInfo) == "function" then
+    local ok, info = pcall(model.getInfo)
+    if ok and type(info) == "table" and type(info.name) == "string" and info.name ~= "" then
+      return info.name
+    end
+  end
+  return nil
+end
+
+local function modelStoreReady()
+  local session = type(_G) == "table" and _G.rfsuite and _G.rfsuite.session or nil
+  return type(session) == "table" and session.mcu_id ~= nil and type(session.modelPreferences) == "table"
+end
+
+-- What the theme declared for the page this menu id names, so the module is told the page by
+-- the same title the tile was drawn with. A page id the theme no longer declares resolves to
+-- nothing, and the module is then called exactly as a theme without pages is.
+local function findThemePage(theme, pageId)
+  if type(pageId) ~= "string" or type(theme) ~= "table" or type(theme.pages) ~= "table" then
+    return nil
+  end
+  for i = 1, #theme.pages do
+    local page = theme.pages[i]
+    if page.id == pageId then
+      return { id = page.id, title = page.title }
+    end
+  end
+  return nil
+end
+
+-- Every context the theme's module is handed carries the page, not only the factory's: a module
+-- returned as a plain table never sees the factory context, and reads the page inside `build`.
+local function setContextPage(ctx)
+  if type(ctx) == "table" then
+    ctx.page = ui.activePage
+  end
 end
 
 local function ensureThemes()
@@ -96,34 +172,49 @@ local function ensureLoaded(prefs)
   ui.loaded = true
 end
 
+-- Every hook that reaches the theme's module comes through here, so this is where the scope is
+-- set: before anything of the module runs, because the module reads and saves through the
+-- library without being told which half of the configuration it is editing.
 local function loadThemeModule(ctx)
   ensureThemes()
 
-  local path = themePathFromMenu(ctx)
+  local path, pageId, scope = themePathFromMenu(ctx)
+  DashboardLib.setEditScope(scope)
   if type(path) ~= "string" or path == "" then
     ui.activeThemeConfigPath = nil
+    ui.activePageId = nil
+    ui.activeScope = nil
+    ui.activePage = nil
     ui.activeTheme = nil
     ui.activeModule = nil
+    setContextPage(ctx)
     return nil
   end
 
-  if ui.activeThemeConfigPath == path and ui.activeModule ~= nil then
+  if ui.activeThemeConfigPath == path and ui.activePageId == pageId and ui.activeScope == scope
+    and ui.activeModule ~= nil then
+    setContextPage(ctx)
     return ui.activeModule
   end
 
   local theme = DashboardLib.getThemeByPath(ui.configurableThemes, path)
   ui.activeThemeConfigPath = path
+  ui.activePageId = pageId
+  ui.activeScope = scope
+  ui.activePage = findThemePage(theme, pageId)
   ui.activeTheme = theme
   ui.activeModule = false
+  setContextPage(ctx)
 
   if not theme or type(theme.configurePath) ~= "string" or theme.configurePath == "" then
     return nil
   end
 
-  local loaded = loadThemeConfig(theme.configurePath)
+  local loaded = loadThemeConfig(theme.configurePath, scope)
   if type(loaded) == "function" then
     local createdOk, created = pcall(loaded, {
       theme = theme,
+      page = ui.activePage,
       preferences = ctx and ctx.preferences or nil,
       i18n = ctx and ctx.i18n or nil,
       dashboardLib = DashboardLib,
@@ -146,13 +237,6 @@ function M.getHeaderActions()
   return { save = true, reload = true, help = true }
 end
 
-function M.allowMemAutoRefresh()
-  local module = ui.activeModule
-  if type(module) == "table" and type(module.allowMemAutoRefresh) == "function" then
-    return module.allowMemAutoRefresh()
-  end
-  return true
-end
 
 function M.onReload(ctx)
   ensureDeps()
@@ -160,6 +244,9 @@ function M.onReload(ctx)
   ui.themes = nil
   ui.configurableThemes = nil
   ui.activeThemeConfigPath = nil
+  ui.activePageId = nil
+  ui.activeScope = nil
+  ui.activePage = nil
   ui.activeTheme = nil
   ui.activeModule = nil
 
@@ -174,6 +261,17 @@ end
 function M.onSave(ctx)
   ensureDeps()
   local module = loadThemeModule(ctx)
+  -- Without the model's store the library saves nothing in the model scope, so a model page
+  -- that has lost its flight controller says so rather than reporting a save that did not happen.
+  if ui.activeScope == "model" and not modelStoreReady() then
+    if type(ctx.reportSave) == "function" then
+      ctx.reportSave({
+        title = t(ctx.i18n, "save_error_title", "Error"),
+        message = t(ctx.i18n, "model_store_missing", "Connect the flight controller to save this model's settings")
+      })
+    end
+    return true
+  end
   if type(module) == "table" then
     if type(module.onSave) == "function" then
       return module.onSave(ctx)
@@ -184,8 +282,11 @@ function M.onSave(ctx)
         return true
       end
       local ok, err = ctx.savePreferences()
-      if not ok and lvgl and lvgl.alert then
-        lvgl.alert({ title = t(ctx.i18n, "save_error_title", "Error"), message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. tostring(err or "io") })
+      if not ok and ctx and type(ctx.reportSave) == "function" then
+        ctx.reportSave({
+          title = t(ctx.i18n, "save_error_title", "Error"),
+          message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. DashboardLib.saveFailureReason(ctx.i18n, err)
+        })
       end
       return true
     end
@@ -199,6 +300,44 @@ function M.build(ctx)
   ui.runtime.setRequestRebuild(ctx.requestRebuild)
 
   local module = loadThemeModule(ctx)
+
+  -- Which values the page edits, above whatever the theme draws: the theme's module is the same
+  -- in both scopes and cannot say it.
+  if ui.activeTheme ~= nil then
+    local scopeText
+    if ui.activeScope == "model" then
+      scopeText = t(ctx.i18n, "scope_model", "Own settings for this model")
+      local name = connectedModelName()
+      if name then scopeText = scopeText .. ": " .. name end
+    else
+      scopeText = t(ctx.i18n, "scope_standard", "Standard values for all models")
+    end
+    ctx.children[#ctx.children + 1] = {
+      type = "label",
+      x = ctx.x,
+      y = ctx.y,
+      w = ctx.w,
+      text = scopeText,
+      color = COLOR_THEME_PRIMARY1,
+      font = SMLSIZE
+    }
+    ctx.y = ctx.y + SCOPE_LABEL_H
+    if type(ctx.h) == "number" then ctx.h = ctx.h - SCOPE_LABEL_H end
+
+    if ui.activeScope == "model" and not modelStoreReady() then
+      ctx.children[#ctx.children + 1] = {
+        type = "label",
+        x = ctx.x,
+        y = ctx.y,
+        w = ctx.w,
+        text = t(ctx.i18n, "model_store_missing", "Connect the flight controller to save this model's settings"),
+        color = COLOR_THEME_PRIMARY1,
+        font = SMLSIZE
+      }
+      return
+    end
+  end
+
   if type(module) == "table" then
     if type(module.build) == "function" then
       module.build(ctx)
@@ -230,10 +369,15 @@ function M.build(ctx)
 end
 
 function M.onClose()
+  -- Leaving the page ends the edit: the library reads what applies again, as the dashboard does.
+  if DashboardLib then DashboardLib.setEditScope(nil) end
   Common.resetPageState(ui)
   ui.themes = nil
   ui.configurableThemes = nil
   ui.activeThemeConfigPath = nil
+  ui.activePageId = nil
+  ui.activeScope = nil
+  ui.activePage = nil
   ui.activeTheme = nil
   ui.activeModule = nil
   Common = nil

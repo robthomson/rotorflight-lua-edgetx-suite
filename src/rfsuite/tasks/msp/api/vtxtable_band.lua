@@ -1,4 +1,6 @@
 -- EdgeTX MSP API: VTXTABLE_BAND (ported)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {
   command = 137,
@@ -59,7 +61,7 @@ function Api.parse(buf)
   for i = 1, 8 do
     parsed["freq_"..i] = read_u16_le(buf, pos); pos = pos + 2
   end
-  return { parsed = parsed }
+  return parsed
 end
 
 function Api.buildWritePayload(data)

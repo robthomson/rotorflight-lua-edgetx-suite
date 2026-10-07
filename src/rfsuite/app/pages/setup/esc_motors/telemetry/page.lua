@@ -10,6 +10,7 @@ local function loadModule(path)
 end
 
 local Controls = nil
+local SavePipeline = nil
 local Common = nil
 local MspRuntime = nil
 local EscSensorConfigApi = nil
@@ -22,7 +23,6 @@ local ui = {
   loaded = false,
   dirty = false,
   loading = false,
-  saving = false,
   progress = 0,
   baseTitle = nil,
   config = {
@@ -88,6 +88,7 @@ end
 
 local function queueTelemetryRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not MspRuntime or not EscSensorConfigApi or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -98,6 +99,7 @@ local function queueTelemetryRead(isAutoReload)
     return false, "msp_queue_unavailable"
   end
 
+  local readValid = type(getSession()) == "table"
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -112,6 +114,7 @@ local function queueTelemetryRead(isAutoReload)
     simulatorResponse = EscSensorConfigApi.simulatorResponse,
     processReply = function(self, buf)
       local parsed = EscSensorConfigApi.parse(buf)
+      if type(parsed) ~= "table" then return Common.failPageRead(ui) end
       if parsed then
         ui.config.protocol = parsed.protocol or 0
         ui.config.half_duplex = parsed.half_duplex or 0
@@ -140,11 +143,13 @@ local function queueTelemetryRead(isAutoReload)
       ui.loading = false
       ui.dirty = false
       ui.progress = 100
+      ui.runtime.readComplete = readValid
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
       end
     end,
     errorHandler = function()
+      readValid = false
       ui.runtime.readPending = false
       ui.loading = false
       if type(ui.runtime.requestRebuild) == "function" then
@@ -157,14 +162,9 @@ local function queueTelemetryRead(isAutoReload)
 end
 
 local function queueTelemetryWrite(requestRebuild)
-  if not MspRuntime or not EscSensorConfigApi or type(MspRuntime.getState) ~= "function" then
+  if not SavePipeline then SavePipeline = loadModule("tasks/msp/save_pipeline.lua") end
+  if not SavePipeline or not EscSensorConfigApi then
     return false, "msp_runtime_unavailable"
-  end
-
-  local mspState = MspRuntime.getState()
-  local queue = mspState and mspState.queue
-  if not queue or type(queue.add) ~= "function" then
-    return false, "msp_queue_unavailable"
   end
 
   local writeData = {}
@@ -181,97 +181,47 @@ local function queueTelemetryWrite(requestRebuild)
   writeData.current_correction = ui.config.current_correction
   writeData.consumption_correction = ui.config.consumption_correction
 
-  local payload = EscSensorConfigApi.buildWritePayload(writeData)
-
-  ui.saving = true
-  ui.progress = 0
-  if type(requestRebuild) == "function" then
-    requestRebuild()
-  end
-
-  queue:add({
-    command = EscSensorConfigApi.writeCommand,
-    payload = payload,
-    isWrite = true,
-    simulatorResponse = {},
-    processReply = function()
-      -- Step 2: Write EEPROM
-      local eepromApi = loadModule("tasks/msp/api/eeprom_write.lua")
-      if eepromApi then
-        queue:add({
-          command = eepromApi.writeCommand,
-          payload = {},
-          isWrite = true,
-          simulatorResponse = {},
-          processReply = function()
-            -- Step 3: Reboot FC
-            local rebootApi = loadModule("tasks/msp/api/reboot.lua")
-            if rebootApi then
-              queue:add({
-                command = rebootApi.writeCommand,
-                payload = rebootApi.buildWritePayload({ rebootMode = 0 }),
-                isWrite = true,
-                simulatorResponse = {},
-                processReply = function()
-                  ui.dirty = false
-                  ui.saving = false
-                  local session = getSession()
-                  if session then
-                    session.setup_esc_motors_telemetry = nil
-                    session.esc4WayDetectedProto = ui.config.protocol
-                  end
-                  if type(requestRebuild) == "function" then
-                    requestRebuild()
-                  end
-                end,
-                errorHandler = function()
-                  ui.saving = false
-                  if type(requestRebuild) == "function" then
-                    requestRebuild()
-                  end
-                end
-              })
-            else
-              ui.dirty = false
-              ui.saving = false
-              local session = getSession()
-              if session then
-                session.setup_esc_motors_telemetry = nil
-                session.esc4WayDetectedProto = ui.config.protocol
-              end
-              if type(requestRebuild) == "function" then
-                requestRebuild()
-              end
-            end
-          end,
-          errorHandler = function()
-            ui.saving = false
-            if type(requestRebuild) == "function" then
-              requestRebuild()
-            end
-          end
-        })
-      else
-        ui.dirty = false
-        ui.saving = false
-        if type(requestRebuild) == "function" then
-          requestRebuild()
-        end
+  -- The chain that stood here cleared the dirty flag inside the REBOOT step's processReply --
+  -- which is the moment the restart was sent, not the moment the settings were stored, and the
+  -- board is at its least able to confirm anything. It is reported at the EEPROM
+  -- acknowledgement now, and everything after it belongs to the pipeline.
+  return SavePipeline.start({
+    pageId = "setup_esc_motors_telemetry",
+    steps = {
+      {
+        label = "MSP_SET_ESC_SENSOR_CONFIG",
+        command = EscSensorConfigApi.writeCommand,
+        payload = EscSensorConfigApi.buildWritePayload(writeData)
+      }
+    },
+    reboot = true,
+    invalidateSessionKeys = { "setup_esc_motors_telemetry" },
+    onSaved = function()
+      ui.dirty = false
+      local session = getSession()
+      if session then
+        session.esc4WayDetectedProto = ui.config.protocol
       end
     end,
-    errorHandler = function()
-      ui.saving = false
+    onDone = function(result)
+      if result.status ~= "done" then
+        ui.dirty = true
+      end
       if type(requestRebuild) == "function" then
         requestRebuild()
       end
     end
   })
-
-  return true, nil
 end
 
 local function ensureLoaded()
   if ui.loaded then return end
+  -- A save whose overlay was dismissed finished without a screen. Its outcome was held back
+  -- rather than raised over whatever page the user went to; claim it now that this one is open.
+  if not SavePipeline then SavePipeline = loadModule("tasks/msp/save_pipeline.lua") end
+  if SavePipeline and type(SavePipeline.takeResult) == "function" then
+    SavePipeline.takeResult("setup_esc_motors_telemetry")
+  end
 
   if not ui.runtime then
     ui.runtime = {
@@ -308,22 +258,11 @@ local function ensureLoaded()
   end
 end
 
-function M.onLoad()
-  ensureDeps()
-  ensureLoaded()
-end
-
-function M.onActivate()
-  ensureDeps()
-  ensureLoaded()
-end
-
 function M.wakeup(ctx)
   ensureDeps()
   ensureLoaded()
 
   ui.runtime.requestRebuild = ctx and ctx.requestRebuild or nil
-  ui.runtime.syncHeaderTitle = ctx and ctx.syncHeaderTitle or nil
 
   local signature = buildSessionSignature()
   if signature ~= ui.runtime.lastSessionSignature then
@@ -351,7 +290,6 @@ function M.build(ctx)
   ensureLoaded()
 
   ui.runtime.requestRebuild = ctx and ctx.requestRebuild or nil
-  ui.runtime.syncHeaderTitle = ctx and ctx.syncHeaderTitle or nil
 
   local children = ctx.children
   local x = ctx.x
@@ -360,9 +298,9 @@ function M.build(ctx)
   local h = ctx.h
   local i18n = ctx.i18n
 
-  if ui.loading or ui.saving then
-    local titleText = ui.loading and pageText(i18n, "loading_telemetry", "Loading") or pageText(i18n, "saving_telemetry", "Saving")
-    local msgText = ui.loading and pageText(i18n, "loading_telemetry", "Loading telemetry configuration...") or pageText(i18n, "saving_telemetry", "Saving telemetry configuration...")
+  if ui.loading then
+    local titleText = "@i18n(app.loading)@"
+    local msgText = pageText(i18n, "loading_telemetry", "Loading telemetry configuration...")
     LoadingOverlay.append(children, {
       x = x, y = y, w = w, h = h,
       title = titleText,
@@ -401,7 +339,15 @@ function M.build(ctx)
 
   local hasPinSwap = ApiVersion.isAtLeast(rawApiVersion, {12, 0, 7})
   local hasCorrections = ApiVersion.isAtLeast(rawApiVersion, {12, 0, 8})
+  local hasXdfly = ApiVersion.isAtLeast(rawApiVersion, {12, 0, 8})
+  local hasFbus = ApiVersion.isAtLeast(rawApiVersion, {12, 0, 9})
+  local hasSrxl2 = ApiVersion.isAtLeast(rawApiVersion, {12, 0, 10})
 
+  -- These numbers are the flight controller's own protocol enum and a board stores whatever
+  -- it is sent, so an entry the board does not have is not an unused label: it is a different
+  -- protocol's number. The head is fixed. XDFLY, FrSky F.BUS and SRXL2 were each added in
+  -- front of RECORD, which has been the last entry since before any of them, so RECORD's own
+  -- number moves with them and is taken from what was appended rather than written down.
   local protocolOptions = {
     { label = "NONE", value = 0 },
     { label = "BLHELI32", value = 1 },
@@ -414,11 +360,18 @@ function M.build(ctx)
     { label = "APD", value = 8 },
     { label = "OPENYGE", value = 9 },
     { label = "FLYROTOR", value = 10 },
-    { label = "GRAUPNER", value = 11 },
-    { label = "XDFLY", value = 12 },
-    { label = "FrSky F.BUS", value = 13 },
-    { label = "RECORD", value = 14 }
+    { label = "GRAUPNER", value = 11 }
   }
+
+  local function appendProtocol(label)
+    local value = #protocolOptions
+    protocolOptions[value + 1] = { label = label, value = value }
+  end
+
+  if hasXdfly then appendProtocol("XDFLY") end
+  if hasFbus then appendProtocol("FrSky F.BUS") end
+  if hasSrxl2 then appendProtocol("SRXL2") end
+  appendProtocol("RECORD")
 
   local proto = ui.config.protocol
 
@@ -530,11 +483,16 @@ function M.build(ctx)
   end
 end
 
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
+  if not M.canSave() then return false, "loaded_data_missing" end
   local ok, err = queueTelemetryWrite(ctx and ctx.requestRebuild)
   if not ok then
-    if lvgl and lvgl.alert then
-      lvgl.alert({
+    if ctx and type(ctx.reportSave) == "function" then
+      ctx.reportSave({
         title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
         message = tostring(err or "MSP write failed")
       })
@@ -562,9 +520,6 @@ function M.onHelp(ctx)
   return { title = "Help", message = "No help available" }
 end
 
-function M.allowMemAutoRefresh()
-  return true
-end
 
 function M.onClose()
   if Common and type(Common.resetPageState) == "function" then

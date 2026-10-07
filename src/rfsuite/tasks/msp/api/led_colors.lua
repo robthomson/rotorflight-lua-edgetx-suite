@@ -1,4 +1,6 @@
 -- EdgeTX MSP API: led_colors (ported from Ethos)
+-- Reference module: no shipped page loads it. It is kept for the developer API tester, which
+-- loads a module by its name, and as the starting point for a page that needs this message.
 
 local Api = {
   command = 46,

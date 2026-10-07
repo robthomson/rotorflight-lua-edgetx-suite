@@ -14,14 +14,31 @@ local entries = {
   --settings_shortcuts_page = definePage("settings/shortcuts"),
   settings_dashboard_theme_page = definePage("settings/dashboard/theme"),
   settings_dashboard_settings_page = definePage("settings/dashboard/settings"),
+  settings_dashboard_overrides_page = definePage("settings/dashboard/overrides"),
+  settings_dashboard_inflight_page = definePage("settings/dashboard/inflight"),
+  settings_dashboard_quick_menu_page = definePage("settings/dashboard/quick_menu"),
   --settings_activelook_page = definePage("settings/activelook"),
   settings_localization_page = definePage("settings/localization"),
   settings_audio_page = definePage("settings/audio"),
   settings_audio_events_page = definePage("settings/audio/events"),
-  settings_audio_switches_page = definePage("settings/audio/switches"),
-  settings_audio_timer_page = definePage("settings/audio/timer"),
+  settings_audio_events_connect_page = definePage("settings/audio/events/connect"),
+  settings_audio_events_arming_page = definePage("settings/audio/events/arming"),
+  settings_audio_events_governor_page = definePage("settings/audio/events/governor"),
+  settings_audio_events_voltage_page = definePage("settings/audio/events/voltage"),
+  settings_audio_events_profiles_page = definePage("settings/audio/events/profiles"),
+  settings_audio_events_esc_page = definePage("settings/audio/events/esc"),
+  settings_audio_events_adjustment_page = definePage("settings/audio/events/adjustment"),
+  settings_audio_events_fuel_page = definePage("settings/audio/events/fuel"),
+  settings_audio_events_link_page = definePage("settings/audio/events/link"),
+  settings_audio_volume_page = definePage("settings/audio/volume"),
+  setup_wizard_page = definePage("setup_wizard"),
+  -- The same page, entered under three names. Which name it was opened under is what bounds the
+  -- run to one section, and the page reads that off the menu rather than being told.
+  setup_wizard_radio_page = definePage("setup_wizard"),
+  setup_wizard_board_page = definePage("setup_wizard"),
   setup_configuration_page = definePage("setup/configuration"),
   setup_radio_config_page = definePage("setup/radio_config"),
+  setup_model_page = definePage("setup/model"),
   setup_power_battery_page = definePage("setup/power/battery"),
   setup_power_alerts_page = definePage("setup/power/alerts"),
   setup_power_sources_page = definePage("setup/power/sources"),
@@ -29,6 +46,7 @@ local entries = {
   setup_power_preferences_page = definePage("setup/power/preferences"),
   flight_tuning_pids_page = definePage("flight_tuning/pids"),
   flight_tuning_rates_page = definePage("flight_tuning/rates"),
+  flight_tuning_tune_advisor_page = definePage("flight_tuning/tune_advisor"),
   flight_tuning_advanced_rescue_page = definePage("flight_tuning/advanced/rescue"),
   flight_tuning_advanced_tail_rotor_page = definePage("flight_tuning/advanced/tail_rotor"),
   flight_tuning_advanced_main_rotor_page = definePage("flight_tuning/advanced/main_rotor"),
@@ -44,6 +62,7 @@ local entries = {
   setup_accelerometer_page = definePage("setup/accelerometer"),
   setup_alignment_page = definePage("setup/alignment"),
   setup_ports_page = definePage("setup/ports"),
+  setup_gps_page = definePage("setup/gps"),
   setup_mixer_swash_page = definePage("setup/mixer/swash"),
   setup_mixer_swashgeometry_page = definePage("setup/mixer/swashgeometry"),
   setup_mixer_tail_page = definePage("setup/mixer/tail"),
@@ -52,6 +71,7 @@ local entries = {
   setup_servos_bus_page = definePage("setup/servos/bus"),
   setup_controls_modes_page = definePage("setup/controls/modes"),
   setup_controls_adjustments_page = definePage("setup/controls/adjustments"),
+  setup_controls_inflight_page = definePage("setup/controls/inflight"),
   setup_controls_failsafe_page = definePage("setup/controls/failsafe"),
   setup_controls_beepers_page = definePage("setup/controls/beepers"),
   setup_controls_beepers_configuration_page = definePage("setup/controls/beepers/configuration"),
@@ -64,6 +84,7 @@ local entries = {
   setup_esc_motors_throttle_page = definePage("setup/esc_motors/throttle"),
   setup_esc_motors_telemetry_page = definePage("setup/esc_motors/telemetry"),
   setup_esc_motors_rpm_page = definePage("setup/esc_motors/rpm"),
+  setup_esc_motors_motor_override_page = definePage("setup/esc_motors/motor_override"),
   setup_esc_motors_esc_tools_page = definePage("setup/esc_motors/esc_tools"),
   setup_esc_motors_esc_tools_am32_page = definePage("setup/esc_motors/esc_tools/escmfg/am32"),
   setup_esc_motors_esc_tools_blheli_s_page = definePage("setup/esc_motors/esc_tools/escmfg/blheli_s"),
@@ -82,6 +103,7 @@ local entries = {
   setup_governor_curves_page = definePage("setup/governor/curves"),
   tools_select_profile_page = definePage("tools/select_profile"),
   tools_copy_profiles_page = definePage("tools/copy_profiles"),
+  tools_flight_log_page = definePage("tools/flight_log"),
   -- Disabled for now since the FBL Sensor page is not fully implemented and we don't want users to get confused by a page that doesn't work yet. Will re-enable once the page is ready to be used.
   -- diagnostics_fblsensors_page = definePage("tools/diagnostics/fblsensors"),
   diagnostics_fblstatus_page = definePage("tools/diagnostics/fblstatus"),
@@ -89,6 +111,7 @@ local entries = {
   diagnostics_elrs_link_page = definePage("tools/diagnostics/elrs_link"),
   diagnostics_validate_sensors_page = definePage("tools/diagnostics/validate_sensors"),
   diagnostics_smartfuel_page = definePage("tools/diagnostics/smartfuel"),
+  diagnostics_crsf_sensors_page = definePage("tools/diagnostics/crsf_sensors"),
   diagnostics_session_logs_page = definePage("tools/diagnostics/session_logs"),
   diagnostics_info_page = definePage("tools/diagnostics/info"),
   logs_page = definePage("logs")
@@ -100,12 +123,51 @@ local loadedByPagePath = {}
 local iconByMenuId = {}
 local pagePathByMenuId = {}
 local cacheOrder = {}
+local failedByMenuId = {}
 local MAX_CACHED_PAGE_MODULES = 2
 local closePageModule
 
+-- Runs a page file and returns what it returns, or false and the message when the file cannot
+-- be loaded -- a card that cannot be read, a missing file, no memory left -- or its top level
+-- raises.
+local function runPageFile(fullPath)
+  local chunk, err = loadScript(fullPath, "t")
+  if not chunk then
+    return false, err
+  end
+  return pcall(chunk)
+end
+
+-- What the registry hands out for a page whose file could not be run. Raising here would end the
+-- tool, since none of the registry's callers is inside a pcall, and nil already means "this id
+-- is a menu" to the host. The stand-in's build raises the loader's message instead, so the host
+-- shows the page-build failure screen with it. It is kept until the page is released, so every
+-- caller during one visit gets the same answer and the next visit reads the card again.
+local function failedPage(menuId, err)
+  local message = tostring(err)
+  local module = {
+    build = function()
+      error(message, 0)
+    end
+  }
+  failedByMenuId[menuId] = module
+  return module
+end
+
 local function isDynamicDashboardSettingsPage(menuId)
   if type(menuId) ~= "string" then return false end
-  return string.match(menuId, "^settings_dashboard_settings_[0-9a-f]+_page$") ~= nil
+  -- `settings_` ids edit the radio's standard values and `model_` ids the connected model's
+  -- overrides. Both open the same page, which reads the scope off the id.
+  if string.match(menuId, "^settings_dashboard_settings_[0-9a-f]+_page$") ~= nil
+    or string.match(menuId, "^settings_dashboard_model_[0-9a-f]+_page$") ~= nil then
+    return true
+  end
+  -- A theme that splits its settings into pages puts the page id between the theme token and
+  -- the suffix. The grid holding those pages ends in `_menu` and is deliberately not a page:
+  -- the menu id that answers with a page module here is the one that renders as a page, so a
+  -- grid answering would replace itself with the settings page of its first theme.
+  return string.match(menuId, "^settings_dashboard_settings_[0-9a-f]+_[a-z0-9_]+_page$") ~= nil
+    or string.match(menuId, "^settings_dashboard_model_[0-9a-f]+_[a-z0-9_]+_page$") ~= nil
 end
 
 local function isCacheableMenuId(menuId)
@@ -158,14 +220,18 @@ local function loadPageModule(menuId)
     if loadedByPagePath[fullPath] then
       return loadedByPagePath[fullPath]
     end
-    local chunk = assert(loadScript(fullPath, "t"))
-    local module = chunk()
+    local ok, module = runPageFile(fullPath)
+    if not ok then
+      return failedPage(menuId, module)
+    end
     loadedByPagePath[fullPath] = module
     return module
   end
 
-  local chunk = assert(loadScript(fullPath, "t"))
-  local module = chunk()
+  local ok, module = runPageFile(fullPath)
+  if not ok then
+    return failedPage(menuId, module)
+  end
   if isCacheableMenuId(menuId) then
     loadedByMenuId[menuId] = module
     touchCache(menuId)
@@ -224,6 +290,11 @@ function registry.get(menuId)
     return module
   end
 
+  local failed = failedByMenuId[menuId]
+  if failed ~= nil then
+    return failed
+  end
+
   local loaded = loadPageModule(menuId)
   if loaded and isCacheableMenuId(menuId) then
     evictIfNeeded(menuId)
@@ -232,6 +303,9 @@ function registry.get(menuId)
 end
 
 function registry.release(menuId, ctx)
+  if menuId ~= nil then
+    failedByMenuId[menuId] = nil
+  end
   local released = false
   if not isCacheableMenuId(menuId) then
     released = closePageModule(menuId, ctx)

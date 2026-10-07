@@ -27,14 +27,6 @@ local function pageText(i18n, key, fallback)
   return fallback
 end
 
-function M.onLoad()
-  ensureDeps()
-end
-
-function M.onActivate()
-  ensureDeps()
-end
-
 function M.wakeup(ctx)
   ensureDeps()
 end
