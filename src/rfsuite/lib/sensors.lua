@@ -309,6 +309,8 @@ Sensors.map = {
   -- Flight Control
   ARM  = { label = "Arm Flags", unit = "raw", prec = 0, fallback = 0 },
   Gov  = { label = "Governor", unit = "raw", prec = 0, fallback = 0 },
+  STAT = { label = "System Status", unit = "raw", prec = 0, fallback = 0 },
+  SCFG = { label = "System Config", unit = "raw", prec = 0, fallback = 0 },
 
   -- Power System
   Vbat = { label = "Main Voltage", unit = "V", prec = 2, fallback = 24.2 },
@@ -404,6 +406,8 @@ Sensors.aliases = {
   yaw = "Yaw",
   armflags = "ARM",
   governor = "Gov",
+  system_status = "STAT",
+  system_config = "SCFG",
 }
 
 Sensors.search_paths = {
@@ -427,6 +431,10 @@ Sensors.search_paths = {
   armdisableflags = { "ARMD", "ArmD", "arming_disable_flags", "armdisableflags" },
   smartconsumption = { "SmCp", "Smart Consumption", "smartconsumption", "Capa", "consumption" },
   governor = { "Gov", "Governor", "governor" },
+  -- CRSF names them STAT/SCFG (lib/rf2tlm_sensors.lua); S.Port sensors are
+  -- named by EdgeTX after their appId.
+  system_status = { "STAT", "5140", "system_status" },
+  system_config = { "SCFG", "5141", "system_config" },
   temp_esc = { "EscT", "Tesc", "ESC_TMP", "TescT", "ESC Temp", "temp_esc" },
   temp_mcu = { "Tmcu", "TmcuT", "temp_mcu" }
 }
@@ -536,7 +544,33 @@ local FIRST_SEARCHES_PER_PASS = 4
 -- a timer of this file's own and nothing outside reads it. Sensors.reset() clears it.
 local searchWaits = {}
 
+local readValue
+
+-- Readings the packed status words also carry (rotorflight-firmware
+-- src/main/telemetry/status.h). When the dedicated sensor is not there, the
+-- value is taken from System Status / System Config instead, so firmware that
+-- only sends the packed words still drives arm state, governor and profiles.
+-- armflags is reduced to its ARMED bit, the only bit its readers use.
+local DERIVED = {
+  armflags        = { word = "system_status", shift = 0,  mask = 0x1 },
+  governor        = { word = "system_status", shift = 25, mask = 0xF },
+  pid_profile     = { word = "system_config", shift = 0,  mask = 0x7 },
+  rate_profile    = { word = "system_config", shift = 3,  mask = 0x7 },
+  battery_profile = { word = "system_config", shift = 6,  mask = 0x7 },
+}
+
 function Sensors.getValue(source)
+  local value = readValue(source)
+  if value ~= nil then return value end
+
+  local derived = DERIVED[source]
+  if not derived then return nil end
+  local word = readValue(derived.word)
+  if type(word) ~= "number" then return nil end
+  return bit32.band(bit32.rshift(math.floor(word), derived.shift), derived.mask)
+end
+
+readValue = function(source)
   if type(source) ~= "string" then return nil end
 
   if not loggedSimulatorState then

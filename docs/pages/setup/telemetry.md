@@ -34,6 +34,17 @@ them at once from either level. Leaving the page without saving discards them.
 
 The mode header and the native-mode note are shown on the list only.
 
+## System Status and System Config
+
+The Status group lists **System Status** and **System Config** when the flight controller runs
+firmware with MSP API 12.10 or newer; on older firmware they are not shown and the Star button
+does not select them. They pack the arm state, governor and rescue state, failsafe phase, profile
+numbers and other flight controller status into two sensors (`STAT` and `SCFG` on CRSF).
+
+When the individual Arming Flags, Governor State or profile sensors are not selected, the suite
+reads those values from the two packed sensors instead, so the dashboard and announcements keep
+working with just these two.
+
 ## Sensor Slots & Limits
 
 The flight controller provides up to 40 telemetry sensor slots (`telemetry_sensors[40]`).

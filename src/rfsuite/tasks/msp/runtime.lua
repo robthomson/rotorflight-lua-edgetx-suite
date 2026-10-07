@@ -380,7 +380,9 @@ local function isSimulator()
   return false
 end
 
-local ARM_SOURCES = { "ARM", "Arm", "ARMF", "ArmF" }
+-- STAT / 5140 is the packed System Status word (CRSF / S.Port name), whose
+-- bit 0 is ARMED like the arming flags' bit 0, so the same bit test applies.
+local ARM_SOURCES = { "ARM", "Arm", "ARMF", "ArmF", "STAT", "5140" }
 
 local function readArmedState()
   if type(getValue) ~= "function" then

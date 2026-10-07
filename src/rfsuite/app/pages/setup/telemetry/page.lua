@@ -15,6 +15,7 @@ local MspRuntime = nil
 local TelemetryApi = nil
 local ConfirmDialog = nil
 local LoadingOverlay = nil
+local ApiVersion = nil
 local t = nil
 
 M.eepromWrite = true
@@ -130,11 +131,16 @@ local SENSOR_CATALOG = {
   { id = 104, name = "Debug 4", group = "debug" },
   { id = 105, name = "Debug 5", group = "debug" },
   { id = 106, name = "Debug 6", group = "debug" },
-  { id = 107, name = "Debug 7", group = "debug" }
+  { id = 107, name = "Debug 7", group = "debug" },
+  -- Packed status words (rotorflight-firmware src/main/telemetry/status.h).
+  -- minApi: firmware before MSP API 12.10 does not have them, so they are
+  -- neither listed nor defaulted there (see isOffered()).
+  { id = 120, name = "System Status", group = "status", minApi = { 12, 0, 10 } },
+  { id = 121, name = "System Config", group = "status", minApi = { 12, 0, 10 } }
 }
 
 local DEFAULT_SENSORS = {
-  3, 4, 5, 6, 7, 15, 23, 25, 43, 60, 85, 90, 91, 93, 95, 96, 97, 99
+  3, 4, 5, 6, 7, 15, 23, 25, 43, 60, 85, 90, 91, 93, 95, 96, 97, 99, 120, 121
 }
 
 local NOT_AT_SAME_TIME = {
@@ -219,6 +225,7 @@ local function ensureDeps()
   if not TelemetryApi then TelemetryApi = loadModule("tasks/msp/api/telemetry_config.lua") end
   if not ConfirmDialog then ConfirmDialog = loadModule("ui/confirm_dialog.lua") end
   if not LoadingOverlay then LoadingOverlay = loadModule("ui/loading_overlay.lua") end
+  if not ApiVersion then ApiVersion = loadModule("lib/api_version.lua") end
   if not ui.runtimeBase then
     ui.runtimeBase = Common.createFormRuntime(ui)
     -- onClose leaves ui.runtime nil while the module stays in the page cache, so a re-entry
@@ -291,11 +298,23 @@ local function extractNativeLockedIds(cfg, buffer)
   return locked
 end
 
+-- A catalog entry with minApi is only offered (listed and defaulted) when the
+-- connected firmware's API version reaches it. Before the session knows the
+-- version it is not offered.
+local function isOffered(id)
+  local item = SENSOR_BY_ID[id]
+  if not item then return false end
+  if not item.minApi then return true end
+  local session = getSession()
+  local rawApiVersion = type(session) == "table" and session.apiVersion or nil
+  return ApiVersion ~= nil and ApiVersion.isAtLeast(rawApiVersion, item.minApi)
+end
+
 local function applyDefaults()
   clearConfig()
   for i = 1, #DEFAULT_SENSORS do
     local id = DEFAULT_SENSORS[i]
-    if SENSOR_BY_ID[id] then
+    if isOffered(id) then
       ui.config[id] = true
     end
   end
@@ -345,7 +364,7 @@ local function loadFromSession()
   if not hasSlots then
     for i = 1, #DEFAULT_SENSORS do
       local id = DEFAULT_SENSORS[i]
-      if SENSOR_BY_ID[id] then
+      if isOffered(id) then
         ui.config[id] = true
       end
     end
@@ -813,16 +832,18 @@ function M.build(ctx)
 
     for i = 1, #groupItems do
       local sensorId = groupItems[i].id
-      cursorY = cursorY + Controls.appendRadioSwitch(
-        children,
-        x,
-        cursorY,
-        w,
-        groupItems[i].name,
-        getBoolGetter(sensorId),
-        getBoolSetter(sensorId),
-        getActiveGetter(sensorId)
-      )
+      if isOffered(sensorId) then
+        cursorY = cursorY + Controls.appendRadioSwitch(
+          children,
+          x,
+          cursorY,
+          w,
+          groupItems[i].name,
+          getBoolGetter(sensorId),
+          getBoolSetter(sensorId),
+          getActiveGetter(sensorId)
+        )
+      end
     end
   end
 

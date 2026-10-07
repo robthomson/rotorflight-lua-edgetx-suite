@@ -319,6 +319,12 @@ local sensorsById = {
     -- Adjustment function
     [99] = { sid = 0x1220, name = "ADJ", unit = UNIT_RAW, prec = 0, dec = decAdjFunc },
 
+    -- Packed status words; bit layout in rotorflight-firmware's src/main/telemetry/status.h.
+    -- System status: armed, RX link, failsafe, GPS, battery, rescue and governor state, ...
+    [120] = { sid = 0x1230, name = "STAT", unit = UNIT_RAW, prec = 0, dec = decU32 },
+    -- System config: PID/rate/battery profile numbers, config and hardware state
+    [121] = { sid = 0x1231, name = "SCFG", unit = UNIT_RAW, prec = 0, dec = decU32 },
+
     -- Debug
     [100] = {sid = 0xDB00, name = "DBG0", unit = UNIT_RAW, prec = 0, dec = decS32 },
     [101] = {sid = 0xDB01, name = "DBG1", unit = UNIT_RAW, prec = 0, dec = decS32 },
