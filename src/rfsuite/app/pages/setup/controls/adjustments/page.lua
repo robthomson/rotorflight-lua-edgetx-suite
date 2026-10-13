@@ -119,7 +119,9 @@ local ADJUST_FUNCTIONS = {
   {id = 79, labelKey = "fn_gov_min_throttle", labelFallback = "Gov Min Throttle", min = 0, max = 100, minApi = {12, 0, 9}},
   {id = 80, labelKey = "fn_gov_headspeed", labelFallback = "Gov Headspeed", min = 0, max = 10000, minApi = {12, 0, 9}},
   {id = 81, labelKey = "fn_gov_yaw_ff", labelFallback = "Gov Yaw FF", min = 0, max = 250, minApi = {12, 0, 9}},
-  {id = 82, labelKey = "fn_battery_profile", labelFallback = "Battery Profile", min = 1, max = 6}
+  {id = 82, labelKey = "fn_battery_profile", labelFallback = "Battery Profile", min = 1, max = 6},
+  {id = 83, labelKey = "fn_cyclic_master_gain", labelFallback = "Cyclic Master Gain", min = 25, max = 200, minApi = {12, 0, 10}},
+  {id = 84, labelKey = "fn_yaw_master_gain", labelFallback = "Yaw Master Gain", min = 25, max = 200, minApi = {12, 0, 10}}
 }
 
 local ui = {

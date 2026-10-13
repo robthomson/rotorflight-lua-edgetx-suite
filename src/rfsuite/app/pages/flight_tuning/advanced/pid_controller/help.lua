@@ -18,6 +18,7 @@ return function(ctx)
   local help_p4 = t(i18n, "help_p4", "Error rotation: Allow errors to be shared between all axes.")
   local help_p5 = t(i18n, "help_p5", "I-term relax: Limit accumulation of I-term during fast movements - helps reduce bounce back after fast stick movements.")
   local help_stick_gain = t(i18n, "help_stick_gain", "Error Decay Stick Gain: the further the cyclic stick is deflected, the faster the cyclic I-term decays, on the ground and in flight; 0 = off.")
+  local help_master_gain = t(i18n, "help_master_gain", "Master Gain: scales the cyclic P, I, D and Offset gains (Cyclic) and the tail P, I and D gains (Yaw) together, keeping their ratios. Feedforward, Boost and precomp are not scaled. A change in flight does not upset trim already held by I and Offset.")
 
   local parts = { help_p1 }
   local session = ctx.session or (_G.rfsuite and _G.rfsuite.session)
@@ -30,6 +31,7 @@ return function(ctx)
 
   if showStickGain then
     parts[#parts + 1] = help_stick_gain
+    parts[#parts + 1] = help_master_gain
   end
   parts[#parts + 1] = help_p2
   parts[#parts + 1] = help_p3

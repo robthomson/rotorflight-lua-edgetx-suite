@@ -707,6 +707,17 @@ function M.build(ctx)
     )
   end
 
+  -- 3b) Master gains (dual field: Cyclic & Yaw, API 12.10 and later). They scale the feedback
+  -- terms (cyclic P/I/D/O, tail P/I/D) together; F, B and the precomps stay as tuned.
+  if type(ui.config.cyclic_master_gain) == "number" and isAtLeastVersion({12, 0, 10}) then
+    local specMaster = { scale=1, mult=1, min=25, max=200, suffix="%", decimals=0 }
+    cursorY = cursorY + appendDualFieldRow(children, x, cursorY, w,
+      pageText(i18n, "master_gain", "Master Gain"),
+      pageText(i18n, "cyclic", "Cyclic"), "cyclic_master_gain", specMaster,
+      pageText(i18n, "yaw", "Yaw"), "yaw_master_gain", specMaster
+    )
+  end
+
   -- 4) Error limit (triple field: Roll, Pitch, Yaw)
   cursorY = cursorY + appendTripleFieldRow(children, x, cursorY, w, i18n,
     pageText(i18n, "error_limit", "Error limit"),
