@@ -8,16 +8,37 @@ end
 
 local Controls = nil
 local Common = nil
+-- The mode rules lib/audio.lua acts on (lib/audio_volume.lua), so the page shows what the suite
+-- will do with the file rather than a second reading of it.
+local Rules = nil
 
 -- ─── Config schema ────────────────────────────────────────────────────────────
 
+-- `volume_mode` and `connected_only` are resolved through Rules after the plain copy below,
+-- because a file written before they existed carries neither. `level_connected_only` is carried
+-- through as it was read: it is what such a file meant, and nothing on this page edits it.
 local CONFIG_SCHEMA = {
+  { key = "volume_mode",          type = "number", default = 0 },
+  { key = "connected_only",       type = "bool",   default = false },
   { key = "level",                type = "number", default = 0 },
   { key = "level_connected_only", type = "bool",   default = false },
   { key = "master_gvar",          type = "number", default = 0 },
   { key = "master_normal",        type = "number", default = 80 },
   { key = "master_alert",         type = "number", default = 100 },
 }
+
+local MODE_OFF, MODE_LEVEL, MODE_MASTER = 0, 1, 2
+
+-- The level a pilot starts from on picking Callout level with none stored: 3 plays a sound file
+-- at a quarter of its amplitude, which is what the radio's own Wav volume 0 does (EdgeTX
+-- radio/src/audio.cpp, WavContext::mixBuffer).
+local LEVEL_START = 3
+
+-- The global variables only. The picker has no empty entry: Mode's Off is what turns the master
+-- volume off, so there is one place for it. Read from the lvgl table, which every firmware with
+-- lvgl.source exports; the number is only a fallback, EdgeTX 2.12's SRC_GVAR 1 << 15
+-- (radio/src/dataconstants.h).
+local SRC_GVAR_FILTER = (lvgl ~= nil and lvgl.SRC_GVAR) or 0x8000
 
 local function buildDefaultConfig()
   local cfg = {}
@@ -46,6 +67,9 @@ local function ensureDeps()
   if not Controls then
     Controls = loadModule("ui/controls.lua")
   end
+  if not Rules then
+    Rules = loadModule("lib/audio_volume.lua")
+  end
   if not ui.runtime then
     ui.runtime = Common.createFormRuntime(ui)
   end
@@ -71,6 +95,13 @@ local function copyFromPrefs(prefs)
       ui.config[field.key] = tonumber(audio[field.key]) or field.default
     end
   end
+
+  local mode = Rules.mode(audio)
+  ui.config.volume_mode = mode
+  ui.config.connected_only = Rules.connectedOnly(audio, mode)
+  -- Until the pilot sets Connected only, or a save has stored it, it follows the mode the way a
+  -- file without it is read: on for Master volume, the level's own switch for Callout level.
+  ui.connectedOnlySet = audio.connected_only ~= nil
 end
 
 local function ensureLoaded(prefs)
@@ -79,9 +110,16 @@ local function ensureLoaded(prefs)
   ui.loaded = true
 end
 
-local function getLevelOptions(i18n)
+local function getModeOptions(i18n)
   return {
-    { value = 0, label = t(i18n, "level_default", "Radio default") },
+    { value = MODE_OFF, label = t(i18n, "mode_off", "Off (radio default)") },
+    { value = MODE_LEVEL, label = t(i18n, "mode_level", "Callout level") },
+    { value = MODE_MASTER, label = t(i18n, "mode_master", "Master volume") },
+  }
+end
+
+local function getLevelOptions()
+  return {
     { value = 1, label = "1" },
     { value = 2, label = "2" },
     { value = 3, label = "3" },
@@ -90,19 +128,140 @@ local function getLevelOptions(i18n)
   }
 end
 
-local function getMasterGvarOptions(i18n)
-  return {
-    { value = 0, label = t(i18n, "gvar_off", "Off") },
-    { value = 1, label = "GV1" },
-    { value = 2, label = "GV2" },
-    { value = 3, label = "GV3" },
-    { value = 4, label = "GV4" },
-    { value = 5, label = "GV5" },
-    { value = 6, label = "GV6" },
-    { value = 7, label = "GV7" },
-    { value = 8, label = "GV8" },
-    { value = 9, label = "GV9" },
+local function onModeSelected(value)
+  ui.config.volume_mode = value
+  if value == MODE_LEVEL and (tonumber(ui.config.level) or 0) <= 0 then
+    ui.config.level = LEVEL_START
+  end
+  if not ui.connectedOnlySet then
+    ui.config.connected_only = Rules.connectedOnly(
+      { level_connected_only = ui.config.level_connected_only }, value)
+  end
+  -- The rows below depend on the mode, so this asks for a rebuild.
+  ui.runtime.markDirty()
+end
+
+local function onConnectedOnlySet(value)
+  ui.connectedOnlySet = true
+  ui.runtime.getBoolSetter("connected_only")(value)
+end
+
+-- The source index of GV1. The global variables are one block of mix sources, so GV n is that
+-- index + n - 1; "gvar1" is the firmware's own field name and does not move when a variable is
+-- renamed (radio/src/lua/api_general.cpp, luaMultipleFields).
+local function gvarSourceBase()
+  if type(getFieldInfo) ~= "function" then return nil end
+  local ok, info = pcall(getFieldInfo, "gvar1")
+  if ok and type(info) == "table" then return tonumber(info.id) end
+  return nil
+end
+
+-- A row's `?` opens the page's help sheet with the row's label as its title (the pattern of
+-- app/pages/settings/audio/events/category_page.lua). Cached on ui.runtime, so onClose drops it.
+local function getInlineHelpHandler()
+  if ui.runtime.inlineHelpHandler then return ui.runtime.inlineHelpHandler end
+  ui.runtime.inlineHelpHandler = function(helpText, helpTitle)
+    local openHelp = ui.runtime.openHelp
+    if type(openHelp) == "function" and type(helpText) == "string" and helpText ~= "" then
+      openHelp(helpText, helpTitle)
+    end
+  end
+  return ui.runtime.inlineHelpHandler
+end
+
+-- The options table a row control takes for its `?` button; empty when the row has no text,
+-- which leaves the control as it is drawn without one.
+local function helpOpts(text, title)
+  if type(text) ~= "string" or text == "" then return {} end
+  return { helpText = text, helpTitle = title, onHelp = getInlineHelpHandler() }
+end
+
+-- The global variable row. The picker is EdgeTX's own source picker, filtered to the global
+-- variables this radio has, with their names. Controls has no wrapper for it, so the row draws
+-- its label, the picker and its `?` where appendComboSelect places them.
+local HELP_BTN_W, HELP_BTN_H, HELP_BTN_GAP, PICKER_W = 30, 30, 6, 172
+
+local function appendGvarPicker(children, x, y, w, labelText, help)
+  local rowH = Controls.ROW_H
+  local pickerW = PICKER_W
+  if pickerW > w then pickerW = w end
+  local pickerX = x + w - pickerW - 10 - HELP_BTN_W - HELP_BTN_GAP
+  -- Asked once per build rather than on every refresh of the picker: both answers are tables
+  -- the firmware allocates, and neither changes while the page is open. A pick rebuilds the page.
+  local base = gvarSourceBase()
+  local storedGv = tonumber(ui.config.master_gvar) or 0
+  local shown = 0
+  if storedGv > 0 and base ~= nil and Rules.gvarOnBoard(storedGv) then shown = base + storedGv - 1 end
+
+  children[#children + 1] = {
+    type = "label",
+    x = x, y = Controls.labelY(y, rowH), w = pickerX - x - 8,
+    text = labelText, color = COLOR_THEME_PRIMARY1, font = SMLSIZE
   }
+  children[#children + 1] = {
+    type = "source",
+    x = pickerX, y = Controls.controlY(y, rowH), w = pickerW, h = Controls.CTRL_H,
+    -- NO `title`: the source picker does not take one (see app/pages/setup_wizard/proc_radio.lua).
+    filter = SRC_GVAR_FILTER,
+    -- None picked yet, or a variable this radio lacks, is 0, which EdgeTX draws as its empty
+    -- source: past the last variable come the radio's own sources (TX voltage, time, GPS), and
+    -- the picker would name one of those.
+    get = function() return shown end,
+    set = function(value)
+      value = tonumber(value) or 0
+      local gv = base and (value - base + 1) or 0
+      if gv < 1 or gv > Rules.MAX_GVARS then return end
+      shown = value
+      if gv == (tonumber(ui.config.master_gvar) or 0) then return end
+      ui.config.master_gvar = gv
+      -- Normal and Alert are drawn only with a variable picked.
+      ui.runtime.markDirty()
+    end
+  }
+  if help.helpText then
+    children[#children + 1] = {
+      type = "button",
+      x = pickerX + pickerW + HELP_BTN_GAP, y = y + math.floor((rowH - HELP_BTN_H) / 2),
+      w = HELP_BTN_W, h = HELP_BTN_H,
+      text = "?",
+      press = function() help.onHelp(help.helpText, help.helpTitle) end
+    }
+  end
+  children[#children + 1] = {
+    type = "rectangle",
+    x = x, y = y + rowH, w = w, h = 1,
+    color = COLOR_THEME_SECONDARY2, filled = true
+  }
+  return rowH + 1
+end
+
+local function appendNote(children, x, y, w, text)
+  children[#children + 1] = {
+    type = "label",
+    x = x, y = y, w = w,
+    text = text,
+    color = COLOR_THEME_PRIMARY1,
+    font = SMLSIZE
+  }
+  return Controls.LABEL_H + 4
+end
+
+local function appendPercentField(children, x, y, w, labelText, key, help)
+  return Controls.appendNumberField(
+    children, x, y, w,
+    labelText,
+    {
+      min = 0,
+      max = 100,
+      step = 5,
+      suffix = "%",
+      get = function() return ui.config[key] end,
+      set = ui.runtime.getValueSetter(key),
+      helpText = help.helpText,
+      helpTitle = help.helpTitle,
+      onHelp = help.onHelp
+    }
+  )
 end
 
 -- ─── Module API ──────────────────────────────────────────────────────────────
@@ -122,12 +281,20 @@ function M.onSave(ctx)
   ensureDeps()
   if type(ctx.preferences.audio) ~= "table" then ctx.preferences.audio = {} end
 
+  -- Every key, the other mode's included: picking a mode leaves the other one's settings in the
+  -- file, so switching back finds them as they were.
   for _, field in ipairs(CONFIG_SCHEMA) do
     ctx.preferences.audio[field.key] = ui.config[field.key]
+  end
+  -- Saved in Off with Connected only never set, it stays out of the file, so a mode picked later
+  -- still starts from that mode's own reading of it.
+  if not ui.connectedOnlySet and ui.config.volume_mode == MODE_OFF then
+    ctx.preferences.audio.connected_only = nil
   end
   local ok, err = ctx.savePreferences()
   if ok then
     ui.dirty = false
+    ui.connectedOnlySet = ctx.preferences.audio.connected_only ~= nil
     if ctx and type(ctx.reportSave) == "function" then
       ctx.reportSave({ ok = true, title = t(ctx.i18n, "saved_title", "Saved"), message = t(ctx.i18n, "saved_message", "Settings saved") })
     end
@@ -138,6 +305,8 @@ function M.onSave(ctx)
   end
 end
 
+-- One mode at a time: the selector, Connected only under it, then the chosen mode's rows. A row a
+-- mode gains later goes after that mode's last row, so the rows above it stay where they are.
 function M.build(ctx)
   ensureDeps()
   ensureLoaded(ctx.preferences)
@@ -146,88 +315,79 @@ function M.build(ctx)
   local x, w = ctx.x, ctx.w
   local i18n = ctx.i18n
   local cursorY = ctx.y
+  local mode = ui.config.volume_mode
 
   ui.runtime.setRequestRebuild(ctx.requestRebuild)
+  ui.runtime.openHelp = ctx.openHelp
 
-  Controls.appendStaticSectionHeader(
-    children, x, cursorY, w,
-    t(i18n, "section_callouts", "Callouts")
-  )
-  cursorY = cursorY + Controls.STATIC_SECTION_H
-
+  local modeLabel = t(i18n, "mode", "Mode")
   cursorY = cursorY + Controls.appendComboSelect(
     children, x, cursorY, w,
-    t(i18n, "level", "Level"),
-    getLevelOptions(i18n),
-    ui.config.level,
-    ui.runtime.getValueSetter("level")
+    modeLabel,
+    getModeOptions(i18n),
+    mode,
+    onModeSelected,
+    helpOpts(t(i18n, "help_mode"), modeLabel)
   )
 
+  if mode ~= MODE_LEVEL and mode ~= MODE_MASTER then return end
+
+  local connectedLabel = t(i18n, "connected_only", "Connected only")
   cursorY = cursorY + Controls.appendRadioSwitch(
     children, x, cursorY, w,
-    t(i18n, "level_connected_only", "Connected only"),
-    ui.config.level_connected_only,
-    ui.runtime.getBoolSetter("level_connected_only")
+    connectedLabel,
+    ui.config.connected_only,
+    onConnectedOnlySet,
+    nil,
+    helpOpts(t(i18n, "help_connected_only"), connectedLabel)
   )
 
-  cursorY = cursorY + 10
-  Controls.appendStaticSectionHeader(
-    children, x, cursorY, w,
-    t(i18n, "section_master", "Master Volume")
-  )
-  cursorY = cursorY + Controls.STATIC_SECTION_H
-
-  cursorY = cursorY + Controls.appendComboSelect(
-    children, x, cursorY, w,
-    t(i18n, "master_gvar", "GVAR"),
-    getMasterGvarOptions(i18n),
-    ui.config.master_gvar,
-    function(value)
-      ui.config.master_gvar = value
-      ui.runtime.markDirty()
-    end
-  )
-
-  if ui.config.master_gvar > 0 then
-    cursorY = cursorY + Controls.appendNumberField(
+  if mode == MODE_LEVEL then
+    local levelLabel = t(i18n, "level", "Level")
+    Controls.appendComboSelect(
       children, x, cursorY, w,
-      t(i18n, "master_normal", "Normal"),
-      {
-        min = 0,
-        max = 100,
-        step = 5,
-        suffix = "%",
-        get = function() return ui.config.master_normal end,
-        set = ui.runtime.getValueSetter("master_normal")
-      }
+      levelLabel,
+      getLevelOptions(),
+      ui.config.level,
+      ui.runtime.getValueSetter("level"),
+      helpOpts(t(i18n, "help_level"), levelLabel)
     )
+    return
+  end
 
-    cursorY = cursorY + Controls.appendNumberField(
-      children, x, cursorY, w,
-      t(i18n, "master_alert", "Alert"),
-      {
-        min = 0,
-        max = 100,
-        step = 5,
-        suffix = "%",
-        get = function() return ui.config.master_alert end,
-        set = ui.runtime.getValueSetter("master_alert")
-      }
-    )
+  local gvarLabel = t(i18n, "master_gvar", "Global Variable")
+  cursorY = cursorY + appendGvarPicker(children, x, cursorY, w,
+    gvarLabel, helpOpts(t(i18n, "help_master_gvar"), gvarLabel))
 
-    if type(model) == "table" and type(model.getGlobalVariableDetails) == "function" then
-      local ok, details = pcall(model.getGlobalVariableDetails, ui.config.master_gvar - 1)
-      if ok and type(details) == "table" then
-        if details.popup and details.popup ~= 0 and details.popup ~= false then
-          children[#children + 1] = {
-            type = "label",
-            x = x, y = cursorY, w = w,
-            text = t(i18n, "gvar_popup_warning", "Warning: GVAR popup is enabled"),
-            color = COLOR_THEME_PRIMARY1,
-            font = SMLSIZE
-          }
-          cursorY = cursorY + Controls.LABEL_H + 4
-        end
+  local gv = tonumber(ui.config.master_gvar) or 0
+  if gv <= 0 then
+    -- Master volume with no variable picked writes nothing (lib/audio.lua); said here, so the
+    -- mode is not taken for one that acts.
+    local none = t(i18n, "gvar_none", "No global variable picked, so the master volume does nothing yet. Pick one above.")
+    appendNote(children, x, cursorY + 2, w, none)
+    return
+  end
+  if not Rules.gvarOnBoard(gv) then
+    -- Kept in the file and not acted on (lib/audio.lua); said here, so the picker showing none is
+    -- not taken for a setting that was never made.
+    local missing = t(i18n, "gvar_missing", "GV%d is not on this radio, so the master volume is off. Pick one it has.")
+    appendNote(children, x, cursorY + 2, w, string.format(missing, math.tointeger(math.floor(math.min(gv, 99999))) or 0))
+    return
+  end
+
+  local normalLabel = t(i18n, "master_normal", "Normal")
+  cursorY = cursorY + appendPercentField(children, x, cursorY, w, normalLabel, "master_normal",
+    helpOpts(t(i18n, "help_master_normal"), normalLabel))
+
+  local alertLabel = t(i18n, "master_alert", "Alert")
+  cursorY = cursorY + appendPercentField(children, x, cursorY, w, alertLabel, "master_alert",
+    helpOpts(t(i18n, "help_master_alert"), alertLabel))
+
+  if type(model) == "table" and type(model.getGlobalVariableDetails) == "function" then
+    local ok, details = pcall(model.getGlobalVariableDetails, gv - 1)
+    if ok and type(details) == "table" then
+      if details.popup and details.popup ~= 0 and details.popup ~= false then
+        appendNote(children, x, cursorY, w, t(i18n, "gvar_popup_warning", "Warning: GVAR popup is enabled"))
       end
     end
   end
@@ -237,6 +397,7 @@ function M.onClose()
   Common.resetPageState(ui)
   Controls = nil
   Common = nil
+  Rules = nil
   t = nil
 end
 

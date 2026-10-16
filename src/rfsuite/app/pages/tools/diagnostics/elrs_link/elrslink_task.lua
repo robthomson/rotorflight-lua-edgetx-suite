@@ -83,6 +83,14 @@ local rateField = nil
 local ratioField = nil
 local moduleRateLabel = nil
 local moduleRatioLabel = nil
+-- The module's Max Power (in mW, nil where its label is not a plain number) and whether dynamic
+-- power is on, and whether the walk has reached each field at all. lib/elrs_power.lua names and
+-- reads the two fields; the TX power alert reads them through it too.
+local PowerRead = nil
+local moduleMaxPower = nil
+local moduleDynamicPower = nil
+local maxPowerSeen = false
+local dynamicPowerSeen = false
 local pendingWrites = {}
 local pendingWriteCount = 0
 local pendingWriteIndex = 1
@@ -337,6 +345,24 @@ local function parseTelemetryField()
         selectedLabel = options[1]
     end
 
+    -- The two power fields, by name, before the rate and ratio test below turns every name with
+    -- "power" in it away.
+    PowerRead = PowerRead or loadModule("lib/elrs_power.lua")
+    local powerKind = PowerRead and PowerRead.classify(name) or nil
+    if powerKind then
+        local field = PowerRead.parseSelection(fieldData)
+        if powerKind == "max" then
+            maxPowerSeen = true
+            moduleMaxPower = PowerRead.maxPowerMilliwatts(field)
+        else
+            dynamicPowerSeen = true
+            moduleDynamicPower = PowerRead.dynamicOn(field)
+        end
+        logMsg("parseTelemetryField: power field " .. powerKind .. " maxPower=" .. tostring(moduleMaxPower)
+            .. " dynamic=" .. tostring(moduleDynamicPower))
+        return
+    end
+
     local lowerName = string_lower(name or "")
     local fieldKind = classifyChoiceField(lowerName, options or {})
 
@@ -545,7 +571,9 @@ local function finalize()
             telemetryRatioLabel = moduleRatioLabel,
             telemetryRatio = effectiveRatio,
             telemetryRatioEffective = effectiveRatio,
-            telemetryRatioKind = ratioKind
+            telemetryRatioKind = ratioKind,
+            maxPowerMilliwatts = moduleMaxPower,
+            dynamicPower = moduleDynamicPower
         }
     end
 
@@ -574,6 +602,10 @@ function M.reset()
     ratioField = nil
     moduleRateLabel = nil
     moduleRatioLabel = nil
+    moduleMaxPower = nil
+    moduleDynamicPower = nil
+    maxPowerSeen = false
+    dynamicPowerSeen = false
     clearFieldData()
     clearPendingWrites()
     yesArmCount = nil
@@ -655,7 +687,10 @@ local function handleParameterEntry(data)
     clearFieldData()
     nextActionAt = 0
 
-    if (moduleRateLabel and moduleRatioLabel) or currentField > fieldCount then
+    -- ExpressLRS registers the TX Power folder after Packet Rate and Telem Ratio, so the walk goes
+    -- on past them until Max Power and Dynamic are in as well. A further field is a further name
+    -- here and a further condition on this line.
+    if (moduleRateLabel and moduleRatioLabel and maxPowerSeen and dynamicPowerSeen) or currentField > fieldCount then
         logMsg("handleParameterEntry: discovery complete")
         finalize()
     end
@@ -847,6 +882,13 @@ function M.wakeup()
                 handleParameterEntry(dummyRatio)
             end
         end
+    end
+
+    -- While this walk is talking to the module, the TX power alert in the same Lua state stays out
+    -- of the conversation (lib/audio.lua, txPowerModuleRead): both ask for parameter entries, and
+    -- each drops the entries it did not ask for.
+    if session and (state == "ping" or state == "read") then
+        session.elrsProbeAt = now
     end
 
     -- Process frames via CrsfManager

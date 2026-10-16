@@ -1,0 +1,52 @@
+# The documentation site, built from docs/ as it is. Preview with `mkdocs serve`,
+# published by .github/workflows/docs.yml. See "Documentation" in DEVELOPMENT.md.
+
+site_name: RFSuite for EdgeTX
+site_description: Reference for the Rotorflight Lua suite on EdgeTX radios
+repo_url: https://github.com/rotorflight/rotorflight-lua-edgetx-suite
+repo_name: rotorflight-lua-edgetx-suite
+edit_uri: edit/master/docs/
+
+docs_dir: docs
+exclude_docs: |
+  _template.md
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.action.edit
+
+hooks:
+  - bin/docs/mkdocs_hooks.py
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+plugins:
+  - search
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true

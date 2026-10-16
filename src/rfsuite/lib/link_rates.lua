@@ -3,7 +3,11 @@
 -- Two things live here, and both are the frame's own semantics rather than presentation: the
 -- packet rate the `RFMD` field names, and the test that decides whether the `2RSS` and `ANT`
 -- fields prove a receiver has a second antenna. Neither needs a radio to evaluate, which is
--- why they are data and a pair of pure functions rather than part of the widget.
+-- why they are data and a pair of pure functions rather than part of the widget. Beside them
+-- sit the two things both the dashboard and the audio announcements build on that: the query
+-- that learns which ExpressLRS generation the module runs (its frame functions are passed in,
+-- so it too runs without a radio), the headroom a signal reading has above its rate's floor, and
+-- where a signal-to-noise reading sits between the rate's dynamic-power thresholds.
 --
 -- THE RATE TABLES ARE EXPRESSLRS'S, ONE PER GENERATION, AND THE BYTE DOES NOT SAY WHICH.
 --
@@ -72,7 +76,24 @@ local LinkRates = {}
 --              floor = expected minimum RF sensitivity in dBm, absent where no radio target
 --                      configures the rate, or where the targets that do disagree,
 --              noSnr = true where the modulation reports no usable signal-to-noise ratio,
---              modulation = "FLRC" or "FSK" where the rate is not LoRa, absent where it is }
+--              modulation = "FLRC" or "FSK" where the rate is not LoRa, absent where it is,
+--              snrUp, snrDn = the rate's dynamic-power SNR thresholds in dB, absent where
+--                      the rate has none (noSnr) or the targets that configure it disagree }
+--
+-- `snrUp` and `snrDn` are `DynpowerSnrThreshUp` and `DynpowerSnrThreshDn` of the same
+-- `ExpressLRS_AirRateRFperf` rows the floor comes from (fields: 4.1.0 src/include/common.h:147
+-- and :149, 3.6.4 :145 and :147, 3.0.0 :119 and :121), written in dB as the tables write them,
+-- `SNR_SCALE(x)`; every radio driver scales by 4, so the half-dB figures are exact. ExpressLRS's
+-- dynamic power asks for more power while the reported average SNR is at or below `snrUp` and
+-- for less at or above `snrDn` (3.6.4 src/src/dynpower.cpp:175-181); 4.x starts from the same
+-- pair and, once its statistics window is full, moves both to fit the link's own SNR spread
+-- (4.1.0 dynpower.cpp:192-221), so on 4.x these are the rate's configured figures. The rule is
+-- the floor's: a figure only where every table that configures the byte gives the same pair. On
+-- 4.x that holds for every LoRa byte; on 3.x it fails for three,
+-- because the band is not in the byte: 2 (`RATE_LORA_50HZ`, -1 / 1.5 dB on 900 MHz, -1 / 6.5 on
+-- 2.4 GHz), 4 (`RATE_LORA_100HZ_8CH`, 1 / 3 against 0 / 8.5 -- its floor agrees, its SNR does not)
+-- and 7 (`RATE_LORA_250HZ`, 1 / 3 against 3 / 9.5). Checked against every release tag from 3.0.0
+-- to 4.1.0: no pair of a configured byte changed within either generation.
 --
 -- `noSnr` is ExpressLRS's own distinction rather than a judgement: the FLRC and GFSK rates are
 -- exactly the ones whose `DynpowerSnrThreshUp` is `DYNPOWER_SNR_THRESH_NONE`, the marker its
@@ -94,30 +115,30 @@ local LinkRates = {}
 -- ExpressLRS 4.x (4.0.0 to 4.1.0). Seven configured by no target: 4, 8, 9, 20, 22, 25, 26.
 LinkRates.byMode4 = {
   -- 900 MHz (RATE_LORA_900_* / RATE_FSK_900_*, enum values 0..11)
-  [0]   = { rate = "25Hz",       floor = -123 },
-  [1]   = { rate = "50Hz",       floor = -120 },
-  [2]   = { rate = "100Hz",      floor = -117 },
-  [3]   = { rate = "100Hz Full", floor = -112 },
+  [0]   = { rate = "25Hz",       floor = -123, snrUp = -3, snrDn = 0.5 },
+  [1]   = { rate = "50Hz",       floor = -120, snrUp = -1, snrDn = 1.5 },
+  [2]   = { rate = "100Hz",      floor = -117, snrUp = 1, snrDn = 2.5 },
+  [3]   = { rate = "100Hz Full", floor = -112, snrUp = 1, snrDn = 3 },
   [4]   = { rate = "150Hz" },
-  [5]   = { rate = "200Hz",      floor = -112 },
-  [6]   = { rate = "200Hz Full", floor = -111 },
-  [7]   = { rate = "250Hz",      floor = -111 },
+  [5]   = { rate = "200Hz",      floor = -112, snrUp = 1, snrDn = 3 },
+  [6]   = { rate = "200Hz Full", floor = -111, snrUp = 1, snrDn = 3 },
+  [7]   = { rate = "250Hz",      floor = -111, snrUp = 1, snrDn = 3 },
   [8]   = { rate = "333Hz Full" },
   [9]   = { rate = "500Hz" },
-  [10]  = { rate = "D50Hz",      floor = -112 },
+  [10]  = { rate = "D50Hz",      floor = -112, snrUp = 1, snrDn = 3 },
   [11]  = { rate = "K1000 Full", floor = -101, noSnr = true, modulation = "FSK" },
 
   -- 2.4 GHz (RATE_LORA_2G4_* / RATE_FLRC_2G4_* / RATE_FSK_2G4_*, enum values 20..36)
   [20]  = { rate = "25Hz" },
-  [21]  = { rate = "50Hz",       floor = -115 },
+  [21]  = { rate = "50Hz",       floor = -115, snrUp = -1, snrDn = 6.5 },
   [22]  = { rate = "100Hz" },
-  [23]  = { rate = "100Hz Full", floor = -112 },
-  [24]  = { rate = "150Hz",      floor = -112 },
+  [23]  = { rate = "100Hz Full", floor = -112, snrUp = 0, snrDn = 8.5 },
+  [24]  = { rate = "150Hz",      floor = -112, snrUp = 0, snrDn = 8.5 },
   [25]  = { rate = "200Hz" },
   [26]  = { rate = "200Hz Full" },
-  [27]  = { rate = "250Hz",      floor = -108 },
-  [28]  = { rate = "333Hz Full", floor = -105 },
-  [29]  = { rate = "500Hz",      floor = -105 },
+  [27]  = { rate = "250Hz",      floor = -108, snrUp = 3, snrDn = 9.5 },
+  [28]  = { rate = "333Hz Full", floor = -105, snrUp = 5, snrDn = 9.5 },
+  [29]  = { rate = "500Hz",      floor = -105, snrUp = 5, snrDn = 9.5 },
   [30]  = { rate = "D250",       floor = -104, noSnr = true, modulation = "FLRC" },
   [31]  = { rate = "D500",       floor = -104, noSnr = true, modulation = "FLRC" },
   [32]  = { rate = "F500",       floor = -104, noSnr = true, modulation = "FLRC" },
@@ -127,34 +148,35 @@ LinkRates.byMode4 = {
   [36]  = { rate = "K1000",      floor = -103, noSnr = true, modulation = "FSK" },
 
   -- Both bands at once (RATE_LORA_DUAL_*, enum values 100..101)
-  [100] = { rate = "100Hz Full", floor = -112 },
-  [101] = { rate = "150Hz",      floor = -112 },
+  [100] = { rate = "100Hz Full", floor = -112, snrUp = 0, snrDn = 8.5 },
+  [101] = { rate = "150Hz",      floor = -112, snrUp = 0, snrDn = 8.5 },
 }
 
 -- ExpressLRS 3.x (3.0.0 to 3.6.4; 14 was added in 3.3.0, 15 in 3.4.0, 16..19 in 3.5.0, and no
 -- figure of an existing value changed on the way). Configured by no target: 0, 17, 18.
--- 2 and 7 have no floor because their figure depends on the band (see the header).
+-- 2 and 7 have no floor because their figure depends on the band (see the header); 2, 4 and 7
+-- carry no SNR thresholds for the same reason (see the rows' description above).
 LinkRates.byMode3 = {
   [0]   = { rate = "4Hz" },                                     -- RATE_LORA_4HZ
-  [1]   = { rate = "25Hz",       floor = -123 },                -- RATE_LORA_25HZ
-  [2]   = { rate = "50Hz" },                                    -- RATE_LORA_50HZ: -120 / -115
-  [3]   = { rate = "100Hz",      floor = -117 },                -- RATE_LORA_100HZ
-  [4]   = { rate = "100Hz Full", floor = -112 },                -- RATE_LORA_100HZ_8CH
-  [5]   = { rate = "150Hz",      floor = -112 },                -- RATE_LORA_150HZ
-  [6]   = { rate = "200Hz",      floor = -112 },                -- RATE_LORA_200HZ
-  [7]   = { rate = "250Hz" },                                   -- RATE_LORA_250HZ: -111 / -108
-  [8]   = { rate = "333Hz Full", floor = -105 },                -- RATE_LORA_333HZ_8CH
-  [9]   = { rate = "500Hz",      floor = -105 },                -- RATE_LORA_500HZ
+  [1]   = { rate = "25Hz",       floor = -123, snrUp = -3, snrDn = 0.5 },            -- RATE_LORA_25HZ
+  [2]   = { rate = "50Hz" },                                                         -- RATE_LORA_50HZ: -120 / -115, SNR -1/1.5 / -1/6.5
+  [3]   = { rate = "100Hz",      floor = -117, snrUp = 1, snrDn = 2.5 },             -- RATE_LORA_100HZ
+  [4]   = { rate = "100Hz Full", floor = -112 },                                     -- RATE_LORA_100HZ_8CH: SNR 1/3 / 0/8.5
+  [5]   = { rate = "150Hz",      floor = -112, snrUp = 0, snrDn = 8.5 },             -- RATE_LORA_150HZ
+  [6]   = { rate = "200Hz",      floor = -112, snrUp = 1, snrDn = 3 },               -- RATE_LORA_200HZ
+  [7]   = { rate = "250Hz" },                                                        -- RATE_LORA_250HZ: -111 / -108, SNR 1/3 / 3/9.5
+  [8]   = { rate = "333Hz Full", floor = -105, snrUp = 5, snrDn = 9.5 },             -- RATE_LORA_333HZ_8CH
+  [9]   = { rate = "500Hz",      floor = -105, snrUp = 5, snrDn = 9.5 },             -- RATE_LORA_500HZ
   [10]  = { rate = "D250",       floor = -104, noSnr = true, modulation = "FLRC" },  -- RATE_DVDA_250HZ
   [11]  = { rate = "D500",       floor = -104, noSnr = true, modulation = "FLRC" },  -- RATE_DVDA_500HZ
   [12]  = { rate = "F500",       floor = -104, noSnr = true, modulation = "FLRC" },  -- RATE_FLRC_500HZ
   [13]  = { rate = "F1000",      floor = -104, noSnr = true, modulation = "FLRC" },  -- RATE_FLRC_1000HZ
-  [14]  = { rate = "D50Hz",      floor = -112 },                -- RATE_DVDA_50HZ
-  [15]  = { rate = "200Hz Full", floor = -111 },                -- RATE_LORA_200HZ_8CH
-  [16]  = { rate = "DK500",      floor = -103, noSnr = true, modulation = "FSK" },  -- RATE_FSK_2G4_DVDA_500HZ
+  [14]  = { rate = "D50Hz",      floor = -112, snrUp = 1, snrDn = 3 },               -- RATE_DVDA_50HZ
+  [15]  = { rate = "200Hz Full", floor = -111, snrUp = 1, snrDn = 3 },               -- RATE_LORA_200HZ_8CH
+  [16]  = { rate = "DK500",      floor = -103, noSnr = true, modulation = "FSK" },   -- RATE_FSK_2G4_DVDA_500HZ
   [17]  = { rate = "K1000", modulation = "FSK" },                -- RATE_FSK_2G4_1000HZ
   [18]  = { rate = "K1000", modulation = "FSK" },                -- RATE_FSK_900_1000HZ
-  [19]  = { rate = "K1000 Full", floor = -101, noSnr = true, modulation = "FSK" },  -- RATE_FSK_900_1000HZ_8CH
+  [19]  = { rate = "K1000 Full", floor = -101, noSnr = true, modulation = "FSK" },   -- RATE_FSK_900_1000HZ_8CH
 }
 
 LinkRates.byGeneration = { [3] = LinkRates.byMode3, [4] = LinkRates.byMode4 }
@@ -222,6 +244,100 @@ function LinkRates.generationFromDeviceInfo(data)
   end
   if LinkRates.byGeneration[major] then return major end
   return 0
+end
+
+--- The ExpressLRS generation of the transmitter module -- 3, 4, or 0 for anything else -- or
+--- nil while it is not known, asked for once and remembered on `state`.
+---
+--- The `RFMD` byte means different rates on ExpressLRS 3.x and 4.x and does not say which, so
+--- the module is asked: one device ping, and the device-information frame it answers with names
+--- the release (`generationFromDeviceInfo` above). The answer is kept in `state.linkGeneration`
+--- and the fact that the ping went out in `state.linkPingSent`; a caller clears both where the
+--- next connection may be a different module.
+---
+--- `crsf` is lib/crsf.lua, the one frame multiplexer of the caller's Lua state: asking it for
+--- 0x29 before the ping is what makes it keep the answer when another consumer drains the queue
+--- first, and it keeps every other consumer's frames while this one drains. `push` is
+--- crossfireTelemetryPush. Both are arguments so that the rule can be run without a radio.
+--- Nothing calls this unless it needs a rate: a dashboard theme that declares one of the rate
+--- sources, or an announcement that measures the link against its rate.
+function LinkRates.resolveGeneration(state, crsf, push)
+  if type(state) ~= "table" then return nil end
+  if state.linkGeneration ~= nil then return state.linkGeneration end
+  if not (crsf and type(crsf.popFrame) == "function") then return nil end
+  while true do
+    local data = crsf.popFrame(LinkRates.FRAME_DEVICE_INFO)
+    if data == nil then break end
+    local generation = LinkRates.generationFromDeviceInfo(data)
+    if generation ~= nil then
+      state.linkGeneration = generation
+      return generation
+    end
+  end
+  if state.linkPingSent or type(push) ~= "function" then return nil end
+  local ok, queued = pcall(push, LinkRates.FRAME_DEVICE_PING, LinkRates.PING_PAYLOAD)
+  if not ok then return nil end
+  -- Nil is EdgeTX saying no module runs the CRSF protocol, so nothing will answer and nothing
+  -- ExpressLRS is there. False is a full output buffer, which the next call tries again.
+  if queued == nil then
+    state.linkGeneration = 0
+    return 0
+  end
+  if queued == true then state.linkPingSent = true end
+  return nil
+end
+
+--- The top of the headroom scale below, in dBm: a reading this strong or stronger counts as
+--- the whole window. It is a convention of the scale rather than a figure of ExpressLRS's, and it
+--- is the one the Urban theme's link bars already draw with (themes/urban/layout.lua, RSSI_TOP).
+LinkRates.HEADROOM_TOP = -40
+
+--- How much of the window between the air rate's sensitivity floor and HEADROOM_TOP a signal
+--- reading still has above the floor, in whole percent, 0 to 100: 0 at the floor, where
+--- ExpressLRS expects the receiver to stop decoding, 100 at HEADROOM_TOP and above.
+---
+--- `rssi` is a reading in dBm as EdgeTX carries it (negative), `floor` the `floor` of a row of
+--- the tables above. Nil without a reading -- 0 is what the sensors read once their value has
+--- aged out -- and without a floor, because a headroom against a guessed floor is a wrong number
+--- with a percent sign. Rounded down, as the Urban bars round it, so a spoken figure and a drawn
+--- one agree.
+function LinkRates.headroom(rssi, floor)
+  if type(rssi) ~= "number" or rssi == 0 then return nil end
+  local top = LinkRates.HEADROOM_TOP
+  if type(floor) ~= "number" or floor >= top then return nil end
+  local reading = rssi
+  if reading > top then reading = top end
+  local pct = 100 * (reading - floor) / (top - floor)
+  if pct < 0 then pct = 0 elseif pct > 100 then pct = 100 end
+  return math.floor(pct)
+end
+
+--- Where a signal-to-noise reading sits between the rate's two dynamic-power thresholds, in
+--- whole percent, 0 to 100: 0 at or below `snrUp`, where ExpressLRS asks for more power, 100 at
+--- or above `snrDn`, where it asks for less.
+---
+--- `snr` is an `RSNR` or `TSNR` reading in dB, `row` a row of the tables above. Nil without a
+--- reading and on a row that carries no thresholds (FLRC and FSK rates, which report no SNR, and
+--- the 3.x rates whose thresholds depend on the band). Unlike an RSSI reading, 0 is a reading
+--- here: it is a real signal-to-noise ratio, and on some rates it is the threshold itself.
+--- Rounded down, as LinkRates.headroom is.
+function LinkRates.snrPercent(snr, row)
+  if type(snr) ~= "number" or type(row) ~= "table" then return nil end
+  local up, dn = row.snrUp, row.snrDn
+  if type(up) ~= "number" or type(dn) ~= "number" or dn <= up then return nil end
+  local pct = 100 * (snr - up) / (dn - up)
+  if pct < 0 then pct = 0 elseif pct > 100 then pct = 100 end
+  return math.floor(pct)
+end
+
+--- One decibel in points of LinkRates.snrPercent's scale on `row`, rounded up, or nil where the
+--- row has no thresholds. ExpressLRS reports the SNR in whole dB, so this is the smallest step a
+--- reading can take on that rate's scale.
+function LinkRates.snrPointsPerDb(row)
+  if type(row) ~= "table" then return nil end
+  local up, dn = row.snrUp, row.snrDn
+  if type(up) ~= "number" or type(dn) ~= "number" or dn <= up then return nil end
+  return math.ceil(100 / (dn - up))
 end
 
 --- Do these two readings prove the receiver has a second antenna?

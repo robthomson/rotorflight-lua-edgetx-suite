@@ -134,7 +134,7 @@ local function queueScorpionReadActual(queue, retryOnError)
         -- Hundredths of an amp in the block, which is the unit the row on this page displays
         -- and divides by; the store keeps whole amps.
         if session and EscCurrentLimit then
-          EscCurrentLimit.remember(session, (tonumber(ui.config.max_current) or 0) / 100)
+          EscCurrentLimit.remember(session, (tonumber(ui.config.max_current) or 0) / 100, "scorpion")
         end
         if session then
           session.setup_esc_motors_esc_tools_scorp = {

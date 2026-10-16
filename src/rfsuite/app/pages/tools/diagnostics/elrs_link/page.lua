@@ -200,6 +200,25 @@ local function formatElrsSummary(i18n)
     return "rate=" .. tostring(rateText) .. ", ratio=" .. tostring(ratioText)
 end
 
+-- The module's Max Power and whether dynamic power is on, as the probe read them. Read only: the
+-- TX power alert under Settings > Audio > Events > Link measures against them. A part the module
+-- did not give -- a Max Power label that is not a plain number, a module without the fields -- is "?".
+local function formatTxPower(i18n)
+    local session = getSession()
+    local linkConfig = session and session.elrsLinkConfig
+    if type(linkConfig) ~= "table" then
+        return pageText(i18n, "status_not_probed", "Not probed yet")
+    end
+    local maxText = linkConfig.maxPowerMilliwatts and (tostring(linkConfig.maxPowerMilliwatts) .. " mW") or "?"
+    local dynamicText = "?"
+    if linkConfig.dynamicPower == true then
+        dynamicText = pageText(i18n, "power_dynamic", "dynamic")
+    elseif linkConfig.dynamicPower == false then
+        dynamicText = pageText(i18n, "power_fixed", "fixed")
+    end
+    return maxText .. ", " .. dynamicText
+end
+
 local function actionModeLabel(i18n, mode)
     if mode == ElrsTask.MODE_ROTORFLIGHT_TO_ELRS then
         return pageText(i18n, "action_rf_to_elrs", "RF -> ELRS")
@@ -340,6 +359,7 @@ local function rebuildRows(i18n)
     { label = pageText(i18n, "status", "Status"), value = status },
     { label = pageText(i18n, "rotorflight", "Rotorflight"), value = formatRotorflightSummary(i18n) },
     { label = pageText(i18n, "elrs_module", "ELRS Module"), value = formatElrsSummary(i18n) },
+    { label = pageText(i18n, "tx_power", "TX Power"), value = formatTxPower(i18n) },
     { label = pageText(i18n, "action", "Action"), value = actionModeLabel(i18n, ElrsTask.getMode()) },
   }
 
@@ -410,7 +430,14 @@ function M.build(ctx)
     return
   end
   local rowY = y + 6
+  -- The rows share the body with the buttons below them (15 above, 40 tall), and a row takes 44
+  -- where there is room for it. Five rows of 44 would push the buttons past the bottom of a
+  -- 480x320 screen's body, where four fitted, so a row gives up height before the buttons leave
+  -- the screen; 30 is still a row of small text with its rule below it.
   local rowH = 44
+  if type(ctx.h) == "number" and #state.rows > 0 then
+    rowH = math.max(30, math.min(44, math.floor((ctx.h - 6 - 15 - 40 - 4) / #state.rows)))
+  end
   local labelW = math.floor(w * 0.35)
   local valueX = x + labelW
   local valueW = w - labelW

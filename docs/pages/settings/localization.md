@@ -20,7 +20,7 @@ Always available.
 | Setting | What it does |
 | --- | --- |
 | Language | *Automatic* (the default) follows the card's own language on a packaged build, and the radio's language setting when the suite runs from source or in the simulator. *English* or *German* pins the language instead: the choice is stored on the radio and wins over the automatic resolution. |
-| Temperature Unit | *Celsius* or *Fahrenheit* for every temperature the suite shows — the flight log's columns, the dashboard's gauges and text readouts, and the ESC and MCU temperature thresholds under *Audio > Events* — and for the MCU temperature the alert speaks. |
+| Temperature Unit | *Celsius* or *Fahrenheit* for every temperature the suite shows — the flight log's columns, the dashboard's gauges and text readouts, and the ESC and MCU temperature levels under *Audio > Events* — and for the temperature the ESC and MCU alerts speak. |
 | Altitude Unit | *Meter* or *Feet*. Stored like the other two, but nothing reads it yet, so it changes no readout today. |
 
 ## Notes

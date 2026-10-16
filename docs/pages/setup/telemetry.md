@@ -41,7 +41,7 @@ firmware with MSP API 12.10 or newer; on older firmware they are not shown and t
 does not select them. They pack the arm state, governor and rescue state, failsafe phase, profile
 numbers and other flight controller status into two sensors (`STAT` and `SCFG` on CRSF).
 
-When the individual Arming Flags, Governor State or profile sensors are not selected, the suite
+When the individual Arming Flags, Governor State, Rescue State or profile sensors are not selected, the suite
 reads those values from the two packed sensors instead, so the dashboard and announcements keep
 working with just these two.
 

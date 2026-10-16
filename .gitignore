@@ -8,4 +8,5 @@ __pycache__/
 *.pyc
 *.spec
 bin/package/*.zip
+site/
 

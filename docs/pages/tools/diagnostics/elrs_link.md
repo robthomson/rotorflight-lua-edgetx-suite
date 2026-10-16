@@ -28,10 +28,24 @@ Status row reads *Unavailable while armed* and the buttons do nothing; see *Sett
 | Status | What the page is doing, or what it last did |
 | Rotorflight | The flight controller's telemetry mode, link rate and link ratio, as they are stored on the board |
 | ELRS Module | The packet rate and telemetry ratio the transmitter module is set to |
+| TX Power | The module's *Max Power* and whether its *Dynamic* power is on (*dynamic*) or off (*fixed*). Read only. |
 | Action | Which of the three buttons the last run was started with |
 
 Opening the page reads the flight controller and then asks the transmitter module for its
 parameters. The three buttons become available once that has finished.
+
+The *TX Power* row is what the TX power alert under *Settings* → *Audio* → *Events* → *Link*
+measures against: the transmitter's power as a share of *Max Power*, and only while dynamic power
+is on. ExpressLRS registers both fields in its *TX Power* folder after *Packet Rate* and
+*Telem Ratio*, so the module's parameters are read up to them, a few fields further than the rate
+and ratio alone need. A part the module does not give reads *?*: a module without the fields, and
+a dual-band module built for the CE domain, whose *Max Power* labels are pairs, one limit per band,
+and do not say which band applies. To change either value, use the module's own ExpressLRS script.
+The packet rate also sets the link's **sensitivity floor**: the weakest signal, in dBm, ExpressLRS
+specifies its receiver to decode at that rate -- about -105 dBm at 500 Hz LoRa, down to -123 dBm at
+25 Hz. The RSSI and Downlink alerts under *Settings* → *Audio* → *Events* → *Link Quality* speak a
+signal's headroom above that floor, so a faster rate gives the same signal less headroom (see
+[Audio Events](../../../audio/events.md)).
 
 ## Settings
 

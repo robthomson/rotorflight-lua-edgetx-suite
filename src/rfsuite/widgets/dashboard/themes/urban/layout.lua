@@ -64,6 +64,11 @@ L.DEFAULT_SCHEME = Common.DEFAULT_SCHEME
 -- Values are STRINGS, the numbers included. common.lua says why; the two numeric rows are read
 -- back through tonumber() at build time.
 --
+-- A row with `min` and `max` in place of `values` is a whole number the pilot sets freely in that
+-- range rather than one picked from a list; it is stored as text like the rest. `notAbove` names
+-- the row whose value it may not exceed: the settings page holds it there, and the theme's own
+-- read does too (Common.fuelSteps).
+--
 -- None of these belongs in the render key. A themeConfig read is a BUILD-TIME read: the host
 -- reloads the theme when its preferences change, and what the key bills is a reading that moves
 -- in flight, which no setting does.
@@ -74,6 +79,11 @@ L.SETTINGS = {
   -- menu and tool buttons, the profile row, the link bars, the buttons of the views. Off covers
   -- it (Common.button); the outlines this theme draws itself stay.
   { page = "look",   key = "tap_frames", values = ON_OFF,                      default = "on" },
+  -- The battery gauge's yellow and red steps, in percent of the fuel reading. The defaults are
+  -- the steps the gauge draws with when nobody has set them.
+  { page = "look",   key = "fuel_low",   min = 0, max = 100, default = tostring(Common.FUEL_LOW_DEFAULT) },
+  { page = "look",   key = "fuel_crit",  min = 0, max = 100, default = tostring(Common.FUEL_CRIT_DEFAULT),
+    notAbove = "fuel_low" },
   { page = "topbar", key = "clock",      values = { "date_time", "time" },     default = Common.CLOCK_MODE_DEFAULT },
   -- The link bars, one row each: the receiver's link quality, the transmitter's, and the signal
   -- strength as headroom above the air rate's sensitivity floor.
@@ -120,6 +130,8 @@ function L.settingsLabels()
   end
   return {
     tap_frames = { label = "@i18n(app.pages.settings_dashboard_settings.urban_tap_frames)@", values = onOff() },
+    fuel_low = { label = "@i18n(app.pages.settings_dashboard_settings.urban_fuel_low)@", suffix = " %" },
+    fuel_crit = { label = "@i18n(app.pages.settings_dashboard_settings.urban_fuel_crit)@", suffix = " %" },
     clock = { label = "@i18n(app.pages.settings_dashboard_settings.urban_clock)@",
               values = { date_time = "@i18n(app.pages.settings_dashboard_settings.urban_clock_date_time)@",
                          time = "@i18n(app.pages.settings_dashboard_settings.urban_clock_time)@" } },
@@ -156,6 +168,9 @@ end
 -- What the pilot chose for one key, or the theme's own default where he has chosen nothing.
 local function setting(state, key)
   local entry = SETTINGS_BY_KEY[key]
+  if entry.values == nil then
+    return tostring(Common.percent(state, key, tonumber(entry.default)))
+  end
   return Common.option(state, key, entry.values, entry.default)
 end
 L.setting = setting
@@ -911,11 +926,16 @@ L.SOURCES = {
   { id = "cell_voltage", label = "@i18n(widgets.dashboard.urban_cell_voltage)@", unit = "V", sample = "4.20",
     minKey = "minVoltage", maxKey = "maxVoltage", places = 2, perCell = true,
     make = function(state)
-      -- The cell count is a render key term, so it is a constant of this build.
+      -- The cell count is a render key term, so it is a constant of this build. Common.cells
+      -- answers a count even when the host has none (from the configured full-pack voltage), so
+      -- whether the count is KNOWN is read live: a pack voltage divided by a guessed count is not a
+      -- cell voltage, and the row shows "-" until the host has a count.
       local cells = Common.cells(state)
       return Common.scaledGetter(function()
         local v = num(state.voltage)
         if v == nil or v <= 0 then return nil end
+        local known = num(state.batteryCellCount)
+        if known == nil or known <= 0 then return nil end
         return v / cells
       end, 2)
     end,
@@ -926,6 +946,9 @@ L.SOURCES = {
         -- The pack being gone outranks the pack being low: the figure beside this colour is
         -- no longer a measurement of the main pack at all.
         if state.mainPowerLost == true then return C.crit end
+        -- No cell count, no cell voltage to judge: the row shows "-" and is not coloured.
+        local known = num(state.batteryCellCount)
+        if known == nil or known <= 0 then return C.text end
         local v = num(state.voltage)
         local cfg = state.themeConfig
         local vMin = cfg and num(cfg.v_min) or nil

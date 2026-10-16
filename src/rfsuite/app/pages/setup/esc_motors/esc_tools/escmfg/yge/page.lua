@@ -160,7 +160,7 @@ local function queueYgeReadActual(queue)
         -- Hundredths of an amp in the block, which is the unit the row on this page displays
         -- and divides by; the store keeps whole amps.
         if session and EscCurrentLimit then
-          EscCurrentLimit.remember(session, (tonumber(ui.config.current_limit) or 0) / 100)
+          EscCurrentLimit.remember(session, (tonumber(ui.config.current_limit) or 0) / 100, "yge")
         end
         if session then
           session.setup_esc_motors_esc_tools_yge = {

@@ -154,7 +154,7 @@ local function queueAm32ReadActual(queue)
         -- Amps as they stand: the block carries the limit in whole amps (the API module doubles
         -- the byte the ESC sends), so nothing is converted here.
         if session and EscCurrentLimit then
-          EscCurrentLimit.remember(session, ui.config.current_limit)
+          EscCurrentLimit.remember(session, ui.config.current_limit, "am32")
         end
         if session then
           session.setup_esc_motors_esc_tools_am32 = {

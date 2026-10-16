@@ -62,10 +62,11 @@ while the model is armed.
 ## Notes
 
 - Opening this page stores the ESC's current limit in this flight controller's preferences on the radio,
-  as whole amps, where the dashboard reads it to show the current as an ESC load percentage
+  as whole amps and marked as this family's, where the dashboard reads it to show the current
+  as an ESC load percentage and the ESC load announcement speaks it
   ([Power → Preferences](../../../power/preferences.md)). Nothing is asked of the flight
   controller for it -- the value comes out of the parameter block the page reads anyway -- and
-  a visit that finds the same limit writes nothing.
+  a visit that finds the same limit, already marked as this family's, writes nothing.
 - Saving writes the whole parameter block to the ESC, not only the settings that were changed.
   Every setting the page offers is written back as it was read unless it was edited, and so is
   everything in the block the page does not show. That includes the bits of the flags byte the

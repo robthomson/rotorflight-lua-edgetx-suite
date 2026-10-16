@@ -68,7 +68,8 @@ for i = 1, #SETTINGS do
   local labels = SETTINGS_LABELS[entry.key] or {}
   local valueLabels = labels.values or {}
   local valid, options = {}, {}
-  for j = 1, #entry.values do
+  -- A number row (`min` and `max`, no `values`) has no option list: its range is the check.
+  for j = 1, #(entry.values or {}) do
     local value = entry.values[j]
     valid[value] = true
     options[j] = { label = valueLabels[value] or value, value = value }
@@ -151,8 +152,37 @@ end
 
 local ui = {
   loaded = false,
-  config = {}
+  config = {},
+  -- The number rows that name a row they may not exceed, collected by loadConfig.
+  capped = {}
 }
+
+-- A number row's stored value as a whole number inside its range, or nil for anything that is not
+-- a number. Out of range is pulled to the edge rather than thrown away, the way the theme reads it
+-- (Common.percent), so the page shows the step the gauge actually draws with.
+local function wholeNumber(entry, value)
+  local n = tonumber(value)
+  if n == nil or n ~= n then return nil end
+  if n < entry.min then n = entry.min end
+  if n > entry.max then n = entry.max end
+  return math.floor(n)
+end
+
+-- Holds every `notAbove` pair of number rows in order: a row never stands above the row it names.
+-- Run after a load and after every change, so the page can neither show nor save a red step above
+-- the yellow one. It walks only the rows that name one, which loadConfig collects, because every
+-- page of this theme opens with a load and most of them carry no such row.
+local function holdNotAbove()
+  local capped = ui.capped
+  for i = 1, #capped do
+    local entry = capped[i]
+    local cap = tonumber(ui.config[entry.notAbove])
+    local value = tonumber(ui.config[entry.key])
+    if cap and value and value > cap then
+      ui.config[entry.key] = tostring(cap)
+    end
+  end
+end
 
 local function loadConfig(prefs)
   if ui.loaded then return end
@@ -192,15 +222,25 @@ local function loadConfig(prefs)
   -- ones: they are stored as text, so a file written by hand -- or by a build of this theme
   -- that offered a value this one does not -- comes back as a string nothing on the page
   -- matches. Falling back to the default is the only answer that leaves the picture defined.
+  local capped = {}
   for i = 1, #SETTINGS do
     local entry = SETTINGS[i]
     local value = cfg[entry.key]
-    if type(value) == "number" then value = tostring(value) end
-    if type(value) ~= "string" or not SETTINGS_VALID[entry.key][value] then
-      value = entry.default
+    if entry.values == nil then
+      -- A number row: any number is met, pulled into its range; anything else is the default.
+      local n = wholeNumber(entry, value)
+      value = n and tostring(n) or entry.default
+      if entry.notAbove then capped[#capped + 1] = entry end
+    else
+      if type(value) == "number" then value = tostring(value) end
+      if type(value) ~= "string" or not SETTINGS_VALID[entry.key][value] then
+        value = entry.default
+      end
     end
     ui.config[entry.key] = value
   end
+  ui.capped = capped
+  holdNotAbove()
 
   -- A number, or a number as text where the preferences file hands it back that way; anything
   -- else is no choice made: no switch.
@@ -319,7 +359,27 @@ end
 local function appendSettings(children, x, cursorY, w, page)
   for i = 1, #SETTINGS do
     local entry = SETTINGS[i]
-    if entry.page == page then
+    if entry.page == page and entry.values == nil then
+      -- A number row. Its upper bound can move with the row it may not exceed, which a field's
+      -- fixed range cannot follow, so the bound is held here: a value above the named row is
+      -- taken as that row's value, and raising or lowering any row pulls down every row that
+      -- names it. The field reads its value back through `get`.
+      local key = entry.key
+      cursorY = cursorY + Controls.appendNumberField(children, x, cursorY, w, SETTINGS_ROW_LABEL[key], {
+        min = entry.min,
+        max = entry.max,
+        suffix = (SETTINGS_LABELS[key] or {}).suffix,
+        get = function() return tonumber(ui.config[key]) or tonumber(entry.default) end,
+        set = function(value)
+          local n = wholeNumber(entry, value)
+          if n == nil then return end
+          local cap = entry.notAbove and tonumber(ui.config[entry.notAbove])
+          if cap and n > cap then n = cap end
+          ui.config[key] = tostring(n)
+          holdNotAbove()
+        end,
+      })
+    elseif entry.page == page then
       local key = entry.key
       cursorY = cursorY + Controls.appendComboSelect(children, x, cursorY, w,
         SETTINGS_ROW_LABEL[key], SETTINGS_OPTIONS[key], ui.config[key],

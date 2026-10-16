@@ -498,9 +498,30 @@
     "needs_translation": false
   },
   {
+    "file": "stat/alerts/downlink.wav",
+    "english": "Downlink",
+    "translation": "Downlink",
+    "needs_translation": false
+  },
+  {
+    "file": "stat/alerts/downlink_snr.wav",
+    "english": "Downlink SNR",
+    "translation": "Downlink SNR",
+    "file": "stat/alerts/dropouts.wav",
+    "english": "Telemetry Dropouts",
+    "translation": "Telemetrie-Aussetzer",
+    "needs_translation": false
+  },
+  {
     "file": "stat/alerts/esc.wav",
     "english": "Esc Temperature",
     "translation": "ESC-Temperatur",
+    "needs_translation": false
+  },
+  {
+    "file": "stat/alerts/escload.wav",
+    "english": "ESC Load",
+    "translation": "ESC-Last",
     "needs_translation": false
   },
   {
@@ -570,6 +591,27 @@
     "needs_translation": false
   },
   {
+    "file": "stat/alerts/rssi.wav",
+    "english": "RSSI",
+    "translation": "RSSI",
+    "needs_translation": false
+  },
+  {
+    "file": "stat/alerts/snr.wav",
+    "english": "SNR",
+    "translation": "SNR",
+    "file": "stat/alerts/rescue_off.wav",
+    "english": "Rescue – Off",
+    "translation": "Rescue aus",
+    "needs_translation": false
+  },
+  {
+    "file": "stat/alerts/rescue_on.wav",
+    "english": "Rescue – Active",
+    "translation": "Rescue aktiv",
+    "needs_translation": false
+  },
+  {
     "file": "stat/alerts/telemetrylost.wav",
     "english": "Telemetry Lost",
     "translation": "Telemetrie verloren",
@@ -585,6 +627,12 @@
     "file": "stat/alerts/timer.wav",
     "english": "timer",
     "translation": "Timer",
+    "needs_translation": false
+  },
+  {
+    "file": "stat/alerts/txpower.wav",
+    "english": "TX Power",
+    "translation": "Sendeleistung",
     "needs_translation": false
   },
   {

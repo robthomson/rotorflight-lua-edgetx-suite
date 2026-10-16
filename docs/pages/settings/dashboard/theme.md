@@ -69,7 +69,7 @@ The model's own theme settings are edited under
 ## Related
 
 - [Settings](settings.md) — the theme settings, standard and per model.
-- [Dashboard themes](../../../dashboard/README.md) — what the widget shows and which themes ship
-  with the suite.
+- [Dashboard themes](../../../dashboard/themes.md) — every theme that ships with the suite, with a
+  picture of each of its three screens.
 
 *Documented against RFSuite 0.1.7.*

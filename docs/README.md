@@ -8,6 +8,8 @@ sidebar_label: RFSuite documentation
 This folder is the reference for what the tool shows and does: one file per configuration
 page, in the layout of the menu on the radio, plus the topics that are not a page. It is
 plain Markdown, versioned with the code, and it is not part of the installation archive.
+The same files are published as a website with search; [DEVELOPMENT.md](../DEVELOPMENT.md)
+under *Documentation* says how it is built and how to preview it.
 
 Installing and updating RFSuite, the two widgets, the audio pack and the model image are
 described in the [README](../README.md); this folder does not repeat them. Working on the
@@ -46,8 +48,8 @@ reason is a good one.
 - Plain CommonMark that renders on GitHub as it is: no MDX, no admonition syntax, no
   imports. A page written this way can be lifted to the Rotorflight website unchanged.
 - A YAML front matter with `title`, `sidebar_label` and `sidebar_position`, the position in
-  multiples of 10 in the order of the tiles on the radio. The website reads these; GitHub
-  shows them as a small table.
+  multiples of 10 in the order of the tiles on the radio. The website orders a section by
+  `sidebar_position`; GitHub shows the front matter as a small table.
 - Relative links with the `.md` extension, for example `../reference/preview-features.md`.
 - Menu paths in the words the radio shows: *Configuration* → *Setup* → *Ports*.
 - Every page file ends with the release it was checked against, so a stale page can be told

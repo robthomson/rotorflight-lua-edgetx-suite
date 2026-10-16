@@ -23,6 +23,8 @@ translations, like every other theme's, so it speaks the language of the package
 
 ## What it shows
 
+![Urban before, during and after the flight, on a TX16S MK3](../images/dashboard/themes/urban.png)
+
 **On the ground and in flight** one screen, which does not change shape at spool-up:
 
 - **Top bar** — in full screen two buttons at the left, the menu and the tool, then the clock; up to four stacked
@@ -33,7 +35,14 @@ translations, like every other theme's, so it speaks the language of the package
   and the throttle, a status line, and the PID, rate and battery profile numbers.
 - **Middle** — a vertical battery gauge with the cell count, the fuel percentage and the capacity
   used. Until the model has reported a fuel reading the gauge is empty and reads `--%` rather
-  than an empty pack.
+  than an empty pack. The fill is red at the red step and below, yellow at the yellow step and
+  below, and green above that — or orange instead of green when the pack was not full when it
+  was plugged in. The two steps are set on the *Look* page, 20 % for yellow and 0 % for red unless
+  they are changed. The not-full verdict is the suite's own, taken once per connection against
+  the flight controller's *Max cell voltage* less the *Margin* of the *Pack Not Full* announcement
+  (*Settings* → *Audio* → *Events* → *On Connect*), and it is drawn whether or not that
+  announcement is switched on. Yellow and red still come first: a not-full pack that runs down
+  turns yellow and then red like any other.
 - **Right panel** — five value rows, each chosen on the *Value Rows* page.
 - **Bottom bar** — the model name, the arm state, the transmitter power and the skipped-frame
   count. While the flight controller names reasons that block arming, the whole bar shows them
@@ -140,6 +149,8 @@ setting.
 | Look | Colour scheme | *Light* (default) or *Dark*. |
 | Look | Arm state colours | *Green and red* (default): armed green, disarmed red. *Amber and grey*: armed amber, disarmed in the label colour. |
 | Look | Frames on tap areas | *On* (default) shows the radio's own frame, light blue in its default theme, around every place on the full screen that takes a press. *Off* covers it; the outlines Urban draws itself stay, the choice in force stays green, and a place reached with the rotary encoder still shows the radio's focus frame. |
+| Look | Battery yellow at | The fuel percentage at and below which the battery gauge turns yellow, any whole number from 0 % to 100 %, default 20 %. |
+| Look | Battery red at | The fuel percentage at and below which the gauge turns red, 0 % to 100 %, default 0 %: red only when nothing is left. It cannot be set above *Battery yellow at*, and lowering *Battery yellow at* below it pulls it down too; a stored value above it is drawn as if it were equal. The steps colour the gauge's segments, and a segment is lit only from its own share upward -- the lowest one from a tenth of the gauge where it has ten segments, up to a sixth where it has room for only six -- so a step set below that share colours nothing that shows. The percentage figure keeps its own colour. |
 | Value Rows | Row 1 … Row 5 | The value each row of the right panel shows: cell voltage, voltage, headspeed, current, ESC temperature, MCU temperature, BEC voltage, power, throttle, fuel, capacity used, altitude, link quality, ESC load, ESC status, air rate, rate floor, one of the telemetry sensors listed under [What it reads](#what-it-reads), or nothing. Defaults: cell voltage, headspeed, current, ESC temperature, BEC voltage. |
 | Value Rows | Units beside the values | *Off* (default) gives the width to the figures. |
 | Value Rows | Temperature colours | Colours the ESC and MCU temperature rows. *Off* (default); *Standard*: ESC amber from 90 °C and red from 110 °C, MCU from 75 °C and 90 °C; *Early*: each 10 °C lower. |
@@ -158,7 +169,9 @@ setting.
 
 The cell voltage row turns red below the minimum pack voltage the widget works out for the
 model — the cell count times the flight controller's minimum cell voltage — and the gauge, the
-voltage rows and the status line turn red while the main pack is lost.
+voltage rows and the status line turn red while the main pack is lost. While no cell count is
+known — the flight controller set to detect it and no pack voltage to detect it from — the cell
+voltage row shows `-` and is not coloured, except while the main pack is lost.
 
 The radio draws the frame around every button a script creates, and a script can neither switch
 it off nor change its colour, so *Off* covers it: the button gets square corners and lines in the
@@ -201,9 +214,6 @@ sensor of that name and a declared name that is absent is still searched for.
 - **Priced only with the accounting fix that settles a free-form theme.** `bin/accounting/budgets.lua`
   carries a `theme.urban` row, measured with that fix; without it `bin/accounting/measure.lua`
   never settles a dashboard drawing this theme.
-- **No colour for a pack that was not full when it was plugged in.** The gauge is green above
-  20 %, yellow at 20 % and below and red at nothing left. Telling a part-used pack apart needs a
-  verdict taken at the connect, and a theme has no pass of its own to take it in.
 - **The transmitter power on the statistics bar is the last reading, not the flight's maximum**:
   the flight record keeps no transmitter power.
 - **The arming-disable names cover bits 0 to 25**, named the same whatever MSP API version the

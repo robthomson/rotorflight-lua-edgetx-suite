@@ -43,6 +43,16 @@ end
 --- The key one physical fact is stored under, named here so that no reader has to spell it.
 M.KEY = "esc_current_limit"
 
+--- Where the figure under M.KEY came from, kept beside it: the family whose page reported it
+--- (one of M.ORIGINS' keys), or M.ORIGIN_HAND for a figure typed in under Setup > Power >
+--- Preferences. A file written before the origin was kept has no such key, and that reads as
+--- unknown -- never as by hand, because the figure in it may just as well have come from a
+--- controller. The same store's `battery` section keeps whatever keys it is handed, so the key
+--- needs no declaration there.
+M.ORIGIN_KEY = "esc_current_limit_origin"
+M.ORIGIN_HAND = "hand"
+M.ORIGINS = { am32 = true, scorpion = true, yge = true }
+
 --- Whole amps, or nil where the argument is not a limit at all. A limit of zero is how every
 --- one of the three families spells "no limit set", so it is not a figure to remember: it would
 --- read back as a limit of nought and turn every reading into an overload.
@@ -54,19 +64,21 @@ function M.normalize(amps)
   return limit
 end
 
---- Stores the limit for the flight controller that is connected, and writes the file only where
---- the figure is new. A page reads its block on every visit, so writing unconditionally would be
---- a card write per page open for a value that changes when the ESC is reconfigured and never
---- otherwise.
+--- Stores the limit for the flight controller that is connected, with the family that reported
+--- it, and writes the file only where either is new. A page reads its block on every visit, so
+--- writing unconditionally would be a card write per page open for a value that changes when the
+--- ESC is reconfigured and never otherwise. The origin counts as new too: a figure typed in by
+--- hand that a controller then reports unchanged is the controller's from then on.
 ---
 --- The per-model store is not created here. A save writes the whole table, so saving one that
 --- the connect chain has not filled yet would put a nearly empty file on the card in place of
 --- the model's settings. Where there is nothing to write into, the limit is simply not kept.
-function M.remember(session, amps)
+function M.remember(session, amps, origin)
   local limit = M.normalize(amps)
   if limit == nil then return false, "no_limit" end
   if type(session) ~= "table" then return false, "no_session" end
   if type(session.modelPreferences) ~= "table" then return false, "no_model_preferences" end
+  if not M.ORIGINS[origin] then origin = nil end
 
   local battery = session.modelPreferences.battery
   if type(battery) ~= "table" then
@@ -74,7 +86,7 @@ function M.remember(session, amps)
     session.modelPreferences.battery = battery
   end
 
-  if tonumber(battery[M.KEY]) == limit then return true, "unchanged" end
+  if tonumber(battery[M.KEY]) == limit and battery[M.ORIGIN_KEY] == origin then return true, "unchanged" end
 
   ensureDeps()
   if not PowerModelPreferences or type(PowerModelPreferences.save) ~= "function" then
@@ -86,10 +98,16 @@ function M.remember(session, amps)
   -- "unchanged" and never write it, and a dashboard in its own Lua state, which reads the file,
   -- would not see it.
   local previous = battery[M.KEY]
+  local previousOrigin = battery[M.ORIGIN_KEY]
   battery[M.KEY] = limit
+  battery[M.ORIGIN_KEY] = origin
   local ok, err = PowerModelPreferences.save(session)
-  if not ok then battery[M.KEY] = previous end
-  logD("remember " .. tostring(limit) .. " A: " .. (ok and "saved" or ("failed: " .. tostring(err or "io"))))
+  if not ok then
+    battery[M.KEY] = previous
+    battery[M.ORIGIN_KEY] = previousOrigin
+  end
+  logD("remember " .. tostring(limit) .. " A from " .. tostring(origin) .. ": "
+    .. (ok and "saved" or ("failed: " .. tostring(err or "io"))))
   return ok, err
 end
 
