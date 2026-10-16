@@ -31,6 +31,10 @@ return function(ctx)
 
   if showStickGain then
     parts[#parts + 1] = help_stick_gain
+  end
+  -- The master gains are not tied to an API version (rotorflight-firmware#538 did not bump it):
+  -- shown when the PID profile reply carried them, the same answer the page's row goes by.
+  if session and session.hasMasterGain == true then
     parts[#parts + 1] = help_master_gain
   end
   parts[#parts + 1] = help_p2

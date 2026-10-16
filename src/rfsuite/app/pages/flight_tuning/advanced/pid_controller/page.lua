@@ -707,8 +707,9 @@ function M.build(ctx)
     )
   end
 
-  -- 3b) Master gains (dual field: Cyclic & Yaw, API 12.10 and later). They scale the feedback
-  -- terms (cyclic P/I/D/O, tail P/I/D) together; F, B and the precomps stay as tuned.
+  -- 3b) Master gains (dual field: Cyclic & Yaw, firmware carrying rotorflight-firmware#538, which
+  -- did not bump the API version, so the reply carrying them is what decides). They scale the
+  -- feedback terms (cyclic P/I/D/O, tail P/I/D) together; F, B and the precomps stay as tuned.
   if type(ui.config.cyclic_master_gain) == "number" and isAtLeastVersion({12, 0, 10}) then
     local specMaster = { scale=1, mult=1, min=25, max=200, suffix="%", decimals=0 }
     cursorY = cursorY + appendDualFieldRow(children, x, cursorY, w,

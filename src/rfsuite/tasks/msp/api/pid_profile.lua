@@ -58,9 +58,16 @@ local FIELD_SPEC = {
 -- stored value.
 local ERROR_DECAY_GAIN_CYCLIC = "error_decay_gain_cyclic"
 
--- The cyclic and yaw master gains (percent) follow it, also from API 12.10. They are read only
--- when the reply carries both, and written only when they were read, so a build that has the
--- decay gain but not the master gains never gets bytes it does not expect.
+-- The cyclic and yaw master gains (percent) follow it, on firmware carrying
+-- rotorflight-firmware#538. That added them without an API version bump, so a 12.10 build may or
+-- may not have them and only the reply length tells. They are read only when the reply carries
+-- both, and written only when they were read, so a build that has the decay gain but not the
+-- master gains never gets bytes it does not expect.
+--
+-- Every parse also records the answer as `session.hasMasterGain`, which is what the Adjustments
+-- page and the PID Controller help ask instead of the API version: a reply long enough to carry
+-- the gains comes from firmware that also has adjustment functions 83 and 84. The MSP runtime
+-- clears it on disconnect, so it never answers for another link.
 local CYCLIC_MASTER_GAIN = "cyclic_master_gain"
 local YAW_MASTER_GAIN = "yaw_master_gain"
 
@@ -151,9 +158,15 @@ function Api.parse(buf)
     if #buf > need then
         out[ERROR_DECAY_GAIN_CYCLIC] = tonumber(buf[need + 1]) or 0
     end
-    if #buf >= need + 3 then
+    local hasMasterGain = #buf >= need + 3
+    if hasMasterGain then
         out[CYCLIC_MASTER_GAIN] = tonumber(buf[need + 2]) or 100
         out[YAW_MASTER_GAIN] = tonumber(buf[need + 3]) or 100
+    end
+    local root = _G and _G.rfsuite
+    local session = root and root.session
+    if type(session) == "table" then
+        session.hasMasterGain = hasMasterGain
     end
     return out
 end
