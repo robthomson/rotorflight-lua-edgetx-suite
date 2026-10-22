@@ -223,6 +223,7 @@ whitespace-only diff buries the change a reviewer is looking for.
 | `snapshot.yml` | tag `snapshot/*` | A snapshot release with the per-locale archives, behind the gates |
 | `release.yml` | tag `release/*` | A GitHub release, with notes extracted from `Releases.md`, behind the gates |
 | `testing.yml` | tag `testing/*` | A raw `src` artifact, then deletes the tag again. Ships no archive and runs no gate |
+| `docs.yml` | pull request or push touching `docs/`, `mkdocs.yml` or `bin/docs/` | The documentation site, built with `mkdocs build --strict`; on master it is published with GitHub Pages |
 
 A release tag of the form `release/<x>.<y>.<z>-<suffix>` is published as a Release Candidate;
 without the suffix it is published as a Release. The version baked into the package itself
@@ -242,6 +243,18 @@ rule is in [GEMINI.md](GEMINI.md) under *Documentation Maintenance* and in
 `.agents/rules/documentation.md`, in the same shape as the rule for `Releases.md`. The page
 template is `docs/_template.md`, and `docs/pages/README.md` lists every page with whether its
 file is written yet.
+
+The same files are also published as a website with search and a navigation tree, built by
+MkDocs from `mkdocs.yml` at the root. `bin/docs/mkdocs_hooks.py` points a link that leaves
+`docs/` at the file on GitHub and orders each section by `sidebar_position`. To preview it:
+
+```
+pip install -r bin/docs/requirements.txt
+mkdocs serve
+```
+
+`mkdocs build --strict` is what the `docs.yml` workflow runs; it fails on a link the site
+cannot resolve.
 
 
 ## Sensor tool

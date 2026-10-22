@@ -33,8 +33,8 @@ stores, what the theme selector resolves and what the per-theme settings are key
 The scan (`app/pages/settings/dashboard/lib.lua`, `scanThemes`) takes every entry of the
 folder that is not `.` or `..` and whose name does not end in a dotted extension, loads
 `<folder>/init.lua`, and accepts the folder as a theme when that returns a table with a
-string `name`. A folder with no readable `init.lua` is skipped silently — it appears in the
-log at *DEBUG*, and nowhere else.
+string `name`. A folder with no readable `init.lua` is skipped silently — it is named, with the
+reason, in the one line the scan writes to the log at *DEBUG*, and nowhere else.
 
 `app/pages/settings/dashboard/theme_index.lua` is a checked-in list of the shipped themes and
 is read **only when the scan found nothing at all**, which is the case on a radio whose
@@ -207,9 +207,15 @@ any of this: `armed` looks for the theme's `armed` module and then for its `pref
 loader is always one of the three phases every theme declares.
 
 A module that loads but raises while the widget builds its scene — a free-form `build` that
-throws is the plain case — has nothing to fall back to. The widget tries that build three
+throws is the plain case — has nothing to fall back to. Two more cases count as a raise: a
+free-form `build` that returns anything but a node list (a missing `return` is enough), and a
+build the radio stops at its instruction limit. The widget tries that build three
 times in a row, then stops trying and shows *Dashboard error* in its place; the error is in
-the log, and the first of the three goes to the card as a fault when *Log to card* is on. A
+the log, and the first of the three goes to the card as a fault when *Log to card* is on (a
+stop at the instruction limit goes to the card every time, as the widget's own `widget.refresh`
+fault, and the widget waits 1.2 s before the next try). A
+build that is stopped at the limit only sometimes is drawn again as soon as one try completes,
+which starts the count over; one that is stopped three times in a row stays *Dashboard error*. A
 theme reload starts over: choosing a theme, any change to the preferences, the flight
 controller reconnecting, or a flight phase that brings up another of the theme's modules. Until
 then the error stays on screen, even if the cause has gone away by itself: a build that raises
@@ -219,8 +225,9 @@ as a single label, drawn without the splash builder, and stops only if that rais
 too. The theme at full screen ([`fullscreen = "theme"`](#a-theme-that-takes-fullscreen)), the fullscreen
 menu and the in-flight tuning surface are given up the same way, each on its own count, and at
 full screen *Dashboard error* carries the tool control, as the connect splash does there. The
-views a theme registers are not counted: one whose `build` raises is given up on its first
-raise, as [Views of a theme's own](#views-of-a-themes-own) describes.
+views a theme registers are not counted for a raise: one whose `build` raises is given up on its first
+raise, as [Views of a theme's own](#views-of-a-themes-own) describes. A view whose `build` the
+radio stops at its instruction limit is counted like the other surfaces, on a count of its own.
 
 ### `layout`
 
@@ -252,7 +259,7 @@ Every box takes its place from four fields — `col`, `row`, `colspan`, `rowspan
 | --- | --- | --- |
 | `text` | `telemetry` (default) | A telemetry value, formatted. |
 | `text` | `governor` | The governor state as a label — or, in the two modes that have no state, the mode. See below. |
-| `text` | `blackbox` | Blackbox usage. |
+| `text` | `blackbox` | Blackbox state, the same wording in every theme: `objects/text.lua` hands every text box `themes/default/common.lua`, whose `blackboxLabel(state)` gives REC while armed, the used and total size while the flight controller reports a dataflash, LOGGED after an armed flight, and READY otherwise -- also on a board without a dataflash. |
 | `text` | `stats` | One flight statistic, chosen with `stattype`. |
 | `text` | `text` | Nothing — a decorative container. |
 | `gauge` | `arc`, `bar` | The value between `min` and `max`; `arc` is the default. |
@@ -281,6 +288,10 @@ reports the pack at zero volts, so a live voltage box reads `--.-V` once the pac
 shows the next pack as soon as one is plugged in. Use `last` or `lastcell` for a voltage on a
 post-flight page. `lastcell` does not use the live count for the same reason: the next pack can
 have a different number of cells.
+
+The `stats` source `min_voltage_cell` (no `stattype`) shows the flight's minimum pack voltage per
+cell. After a landing it divides by the same count `lastcell` uses, the one taken at the disarm;
+during a flight, and where the pack read 0 V at the disarm, it divides by the live count.
 
 ### `text` / `governor`, and the two modes that have no state
 
@@ -340,8 +351,10 @@ and the frame does not say.** `RFMD` carries an enumeration value whose meaning 
 whichever module filled it, and ExpressLRS renumbered that enumeration between 3.x and 4.x: the
 same byte is a different rate on each, and the common rates are exactly where the two overlap
 (byte 10 is `D250` on 3.x and `D50Hz` on 4.x). So the widget asks the module. Once the link is
-up and `RFMD` has a reading — and only for a theme that declares one of these two sources — it
-sends the transmitter module one CRSF device ping, and the device-information frame the module
+up and `RFMD` has a reading — and only for a theme that declares one of these two sources, or while
+one of the audio's RSSI and Downlink alerts is on — it sends the transmitter module one CRSF device
+ping (`LinkRates.resolveGeneration`, which the theme and the audio run on the same widget state, so
+they share the one ping and the one answer), and the device-information frame the module
 answers with carries its release number. `lib/link_rates.lua` holds a table for each generation
 (3.0.0 to 3.6.4, and 4.0.0 to 4.1.0; neither changed within its generation) and names its
 sources line by line.
@@ -370,7 +383,9 @@ to the handset for exactly this reason — *"OpenTX's value is signed and will d
 -dBm properly"* — so both numbers are negative dBm and directly comparable. `rssi - floor` is
 therefore the headroom in dB, and `(rssi - floor) / (-30 - floor)` a fraction of the way from the
 floor to a -30 dBm best case. A theme clamps that itself: an RSSI below the floor is a link that
-is still working past what the rate is specified for, which happens.
+is still working past what the rate is specified for, which happens. `LinkRates.headroom(rssi,
+floor)` in `lib/link_rates.lua` is that arithmetic with -40 dBm as the top instead of -30, clamped to 0..100 and rounded
+down, as the audio's RSSI and Downlink alerts and the Urban theme's link bars compute it.
 
 **`link_diversity` only ever rises, and that is deliberate.** A receiver with one radio and two
 antennas spends most of its packets on one of them, so a pass that sees only the first antenna
@@ -512,13 +527,15 @@ temperature limit is converted for a radio set to Fahrenheit — are described o
 
 ### Facts on `state` that are not a box source
 
-A free-form module is handed the widget state and may read more than the value list above. One
-of those is worth naming, because nothing else in the tree says it and a theme that works it out
-for itself will not agree with the announcement that speaks it:
+A free-form module is handed the widget state and may read more than the value list above. Three
+of those are worth naming, because nothing else in the tree says them -- and a theme that works
+the first out for itself will not agree with the announcement that speaks it:
 
 | Field | What it says |
 | --- | --- |
 | `state.mainPowerLost` | The main pack is gone while the flight controller is still answering — it reads as gone rather than merely low, it had read a real voltage earlier in this connection, and a BEC voltage is there beside it. It is the test `lib/audio.lua` makes for its *Main power lost* announcement, decided in one place (`Audio.mainPowerLost`) and published here; it does **not** depend on that announcement being switched on. A theme drawing it would show the voltage slot as running on the reserve and the fuel reading as unknown, because neither is being measured any more. It is refreshed on the telemetry cadence, so like every other reading it stands still on a post-flight screen whose link is gone. |
+| `state.packNotFull` | The pack plugged in was not full: `true` when its voltage per cell was below the flight controller's *Max cell voltage* less the *Margin* of the *Pack Not Full* announcement, `false` once it was judged full, `nil` until it has been judged -- which waits for the connect chain to finish and for a pack voltage, a cell count and the battery configuration read over MSP, so it arrives after the first fuel reading. Judged once per connection and kept for the rest of it, so a pack running down in flight does not turn it `true`; judged again after a reconnect. It is the verdict `lib/audio.lua` speaks for that announcement, decided in one place (`Audio.packNotFull`) and published here on the telemetry cadence; it does **not** depend on that announcement being switched on. Read it with `== true`: `nil` and `false` both mean "nothing to say". Urban draws its fuel gauge orange instead of green while it is `true`. |
+| `state.eventLog` | What changed on the craft and when: the last thirty transitions, oldest first, each `{ kind, value, text, level, time }`. `kind` is `"armed"`, `"disarmed"`, `"connected"`, `"disconnected"`, `"governor"` or `"esc"`; `value` is the governor state index for `"governor"`; `text` is the speed controller's own verdict for `"esc"`, already in the package's language, and nil otherwise, so the theme names every other kind in its own words; `level` is 1 information, 2 warning, 3 error (the speed controller's levels, which `"esc"` carries and a disconnect takes as 2); `time` is the radio's clock as `HH:MM:SS`, empty on a radio without one. A connection's first governor state is its starting point and is not an entry; its speed controller's first verdict is. An `"esc"` entry exists only while the active theme declares `esc_status_live` — the history reads the verdict the snapshot already resolved and never the sensors. The table is never nil, is kept across connections, and changes only on a transition, so a closure reading the newest entries (`log[#log]`, `log[#log - 1]`, ...) reads a few fields per frame and allocates nothing. |
 
 **`source` is read as a literal, once, at theme load.** When a theme is loaded the widget walks
 its boxes and collects every `source` that is a string into the list the derived snapshot is
@@ -690,9 +707,20 @@ a box's `min`, `max` or threshold limit reads it from.
 
 Where the configuration sets no voltage bounds of its own, the widget fills in `v_min` and `v_max`
 from the pack's cell count and the flight controller's minimum and maximum cell voltage, and fills
-them in again whenever the bounds it holds are still the unset defaults or no longer fit the cell
-count. A move of those bounds rebuilds the scene, and the render key is computed again in the pass
-that moves them, so the scene is queued under the key for the new bounds.
+them in again whenever the bounds it holds are still the unset defaults, no longer fit the cell
+count, or were filled in for a different cell count. A move of those bounds rebuilds the scene, and
+the render key is computed again in the pass that moves them, so the scene is queued under the key
+for the new bounds.
+
+The cell count is the one the flight controller reports in telemetry. Until that reads a count --
+it reads 0 for the moment after a pack is plugged in, until the board has detected the pack -- and
+on a model without that sensor, the widget takes the cell count configured on the flight controller
+(*Setup* → *Power* → *Battery*), which is the count the board itself uses for any pack plugged in.
+Only where that is 0, which leaves the detection to the board, or has not been read yet, does it
+estimate the count from the pack voltage. An estimate cannot tell every pack apart: 42 V is a full
+10S pack and a 12S pack at 3.5 V per cell. A voltage below half a cell gives no estimate at all:
+it is no pack, not a 1S pack, so it never sets `state.batteryCellCount` and the bounds are not
+fitted to one cell. A count already held -- a pack that was detected and is then pulled -- is kept.
 
 ## Splitting the settings into pages
 
@@ -793,7 +821,9 @@ the quick menu's sends. A theme adds no entry of its own, and changes none: `ctx
 the entry up again by its `id` among the menu's records and the option by its `id` among that
 record's options as they stand now (NO BATTERY by `none`, the picker's close by being the
 entry's `close`), and runs those — never a `press` out of the table it was handed. An entry or
-an option the menu does not have is refused. `ctx.visible` and `ctx.info` answer for the menu's
+an option the menu does not have is refused, and so is an entry the menu does not offer now
+(`ctx.visible` would answer false for it) -- except the picks and the close of an entry that
+names a `view`, which the battery picker runs whatever the state. `ctx.visible` and `ctx.info` answer for the menu's
 record of that id as well, and a list handed to `ctx.menu` draws the menu's records of the ids
 it names, in its order, and nothing else.
 
@@ -912,7 +942,9 @@ free-form: a declarative phase draws no view. The module is loaded the first tim
 built, through the loader that loads the rest of the theme — from the theme's own folder, a
 user theme from source — so registering a view costs nothing until it is opened, and a module
 that fails to load, or whose `build` raises, is not asked for again (a replaced look falls back
-to the widget's own; a view of the theme's own is closed and refused), with one log line. A view of the previous theme's that is still open
+to the widget's own; a view of the theme's own is closed and refused), with one log line. A
+`build` the radio stops at its instruction limit is not a raise here: it is tried again, and after
+three stops in a row the view shows *Dashboard error* until the theme is reloaded. A view of the previous theme's that is still open
 when the theme changes is closed.
 
 A theme's view module has `build(children, zone, state, ctx)` — it appends the whole tree to
@@ -960,15 +992,18 @@ closure may index it without guarding. A theme reads it and never writes it.
 | --- | --- |
 | `loaded` | the registry has been read for this connection |
 | `pending` | the prompt is on, this model has packs, and this connection the pilot has neither picked nor closed it and the model has not been armed |
-| `candidates` | the registry entries for this model: `id`, `name`, `cap`, `profile`, `cycles`, `last`, plus `targetProfile` |
+| `candidates` | the registry entries for this model: `id`, `name`, `cap`, `cells`, `profile`, `cycles`, `last`, plus `targetProfile` |
 | `selectedId`, `selectedName` | the pack picked this connection, else the one stored for the model, else `nil` |
 | `boardProfile` | the battery profile the flight controller reported on connecting, 0-based; `nil` until it has answered, and again after any profile write, which is not confirmed |
 | `dismissed` | the pilot closed the picker without picking, this connection |
 | `applied` | what became of the profile write: `nil`, `"queued"`, `"skipped"` or `"refused:<why>"` |
 
-`targetProfile` is 0-based like `boardProfile`, and is `nil` where the pack names no profile and
-no board profile is set to its capacity. The BatP telemetry sensor is 1-based and is a different
-number; do not mix the two.
+`targetProfile` is 0-based like `boardProfile`, and is `nil` where the pack names a profile outside
+1-6, or names none and none can be derived for it: no board profile matches it, more than one does
+([the rules](../pages/tools/flight_log.md#the-battery-profile)), or the board's battery
+configuration was not there when the registry was read. With *Set the pack's battery profile* on it
+is resolved again for the picked pack when the pick is applied. The BatP telemetry sensor is
+1-based and is a different number; do not mix the two.
 
 ### `rfsuite.batteryPick`
 

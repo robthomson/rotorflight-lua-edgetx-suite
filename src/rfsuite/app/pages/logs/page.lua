@@ -13,6 +13,7 @@ local Common = nil
 local Controls = nil
 local LoadingOverlay = nil
 local Graph = nil
+local Env = nil
 local t = nil
 
 -- The engine walks a log in small units, and it is what reads a log for BOTH views: the
@@ -20,6 +21,23 @@ local t = nil
 -- So it is loaded once a log has been chosen -- not once the plot has been -- and dropped
 -- again when the page closes. The file list costs nothing for it.
 local GRAPH_TICKS_PER_WAKEUP = 6
+
+-- The tool opened from the dashboard runs inside the widget's call, and EdgeTX stops a widget
+-- call at 20 000 Lua instructions. A summary unit (STATS_LINES_TICK in graph.lua) costs about
+-- half of that, so there a wakeup spends one unit in all: with more, every call was stopped in
+-- the middle of the second, and the row being read at that moment was counted without all of
+-- its values. The tool script runs without that limit and keeps the figure above.
+local GRAPH_TICKS_PER_WIDGET_WAKEUP = 1
+
+-- Hosted, the scan is bounded by a number of units rather than by the clock: the limit counts
+-- instructions, and an entry costs instructions whatever time it takes. Three units of
+-- SCAN_UNIT_ENTRIES cost about 3 700 where the names carry their date.
+local SCAN_UNITS_PER_WIDGET_WAKEUP = 3
+
+-- True while the page is called from inside the dashboard widget (see lib/env.lua).
+local function inWidgetCall()
+  return Env ~= nil and Env ~= false and Env.isWidget() == true
+end
 
 local state = {
   selectedFile = nil,
@@ -57,6 +75,7 @@ local function ensureDeps()
   if not Common then Common = loadModule("app/pages/settings/common.lua") end
   if not Controls then Controls = loadModule("ui/controls.lua") end
   if not LoadingOverlay then LoadingOverlay = loadModule("ui/loading_overlay.lua") end
+  if Env == nil then Env = loadModule("lib/env.lua") or false end
   if not t then t = Common and Common.pageT("logs") or nil end
 end
 
@@ -310,17 +329,22 @@ end
 
 -- Reads at most `budget` entries into the listing and answers how many reads that took: the
 -- reads spent, `.` and `..` and the one that ends the directory among them. That last read is
--- what drops the iterator.
+-- what drops the iterator. A name read is held on the listing until it has been taken, so a
+-- call stopped in between (see scanCollect) takes it on the next one rather than losing it.
 local function readListing(listing, budget)
   local spent = 0
   while listing.iter and spent < budget do
-    local name = listing.iter()
-    spent = spent + 1
-    if name == nil then
+    if listing.held == nil then
+      listing.held = listing.iter() or false
+      spent = spent + 1
+    end
+    local name = listing.held
+    if name == false then
       listing.iter = nil
     elseif name ~= "." and name ~= ".." and name ~= "" then
       listing.names[#listing.names + 1] = name
     end
+    listing.held = nil
   end
   return spent
 end
@@ -471,11 +495,18 @@ local function newScan()
   }
 end
 
+-- An entry is marked as seen, and the walk's position moved past it (scanStep), only once it is
+-- done: the tool opened from the dashboard can be stopped in the middle of one, and the next
+-- wakeup then reads it again rather than leaving the log out of the list.
 local function scanCollect(scan, fileName, fullPath, parentFolder)
   if scan.seen[fullPath] then return end
+  -- Added already by a call stopped before it could mark it.
+  local last = scan.found[#scan.found]
+  if not (last and last.path == fullPath) then
+    local info = extractFileInfo(fileName, fullPath, parentFolder)
+    if info then scan.found[#scan.found + 1] = info end
+  end
   scan.seen[fullPath] = true
-  local info = extractFileInfo(fileName, fullPath, parentFolder)
-  if info then scan.found[#scan.found + 1] = info end
 end
 
 -- Reads up to `budget` names of a listing and counts them as read: the names added, `.` and
@@ -489,7 +520,9 @@ end
 
 -- Advances the scan by at most `budget` entries and answers true once it is complete, with
 -- `scan.found` sorted newest first. Steps that only move from one directory to the next cost
--- nothing and are taken in the same call; the sort is one call on its own.
+-- nothing and are taken in the same call; the sort is one call on its own. Every step leaves
+-- the scan where its phase can go on from, at any point: a call stopped in the middle of one
+-- (see scanCollect) repeats part of it rather than leaving the scan in a phase it cannot finish.
 local function scanStep(scan, budget)
   while budget > 0 do
     if scan.phase == "list" then
@@ -498,9 +531,10 @@ local function scanStep(scan, budget)
       end
       budget = budget - scanRead(scan, scan.listing, budget)
       if not scan.listing.iter then
-        scan.names = scan.listing.names
-        scan.listing = nil
+        local names = scan.listing.names
         scan.i = 0
+        scan.names = names
+        scan.listing = nil
         scan.phase = "walk"
       end
     elseif scan.phase == "walk" then
@@ -514,38 +548,43 @@ local function scanStep(scan, budget)
         else
           local names = sub.listing.names
           while budget > 0 and sub.j < #names do
-            sub.j = sub.j + 1
-            budget = budget - 1
-            local subFile = names[sub.j]
+            local subFile = names[sub.j + 1]
             if string.match(subFile, "%.csv$") then
               scanCollect(scan, subFile, sub.path .. "/" .. subFile, sub.parent)
             end
+            sub.j = sub.j + 1
+            budget = budget - 1
           end
           if sub.j >= #names then
+            -- The entry that opened this folder counts as walked, even where the call that
+            -- opened it was stopped before it could move on.
+            if scan.i < sub.at then scan.i = sub.at end
             scan.sub = nil
           end
         end
       elseif scan.i < #scan.names then
-        scan.i = scan.i + 1
-        budget = budget - 1
-        local entry = scan.names[scan.i]
+        local entry = scan.names[scan.i + 1]
         if string.match(entry, "%.csv$") then
           scanCollect(scan, entry, basePath .. "/" .. entry, "")
         elseif not string.match(entry, "%.%w+$") then
           -- Subdirectory (e.g. Model name)
           local modelDir = basePath .. "/" .. entry
-          scan.sub = { listing = openListing(modelDir), path = modelDir, parent = entry, j = 0 }
+          scan.sub = { listing = openListing(modelDir), path = modelDir, parent = entry, j = 0, at = scan.i + 1 }
         end
+        scan.i = scan.i + 1
+        budget = budget - 1
       else
-        scan.names = nil
-        scan.s = scan.s + 1
-        if scan.s > #SEARCH_PATHS then
+        local s = scan.s + 1
+        if s > #SEARCH_PATHS then
           -- The walk is over. The sort is left to the next call, so it never runs in the same
           -- call as the walk's last entries.
           scan.phase = "sort"
+          scan.names = nil
           return false
         end
         scan.phase = "list"
+        scan.s = s
+        scan.names = nil
       end
     elseif scan.phase == "sort" then
       table.sort(scan.found, function(a, b) return a.sortKey > b.sortKey end)
@@ -559,16 +598,22 @@ local function scanStep(scan, budget)
 end
 
 -- The scan for as long as one wakeup may spend on it; see SCAN_BUDGET_TICKS. Without a clock it
--- takes one unit per call.
-local function scanForAWhile(scan)
-  local clock = type(getTime) == "function" and getTime or nil
+-- takes one unit per call. Given `units`, it takes that many units at most and no clock.
+local function scanForAWhile(scan, units)
+  local clock = (units == nil) and type(getTime) == "function" and getTime or nil
   local start = clock and clock() or 0
-  repeat
+  local taken = 0
+  while true do
     if scanStep(scan, SCAN_UNIT_ENTRIES) then return true end
     -- The sort gets a wakeup of its own rather than what is left of this one.
     if scan.phase == "sort" then return false end
-  until not clock or clock() - start >= SCAN_BUDGET_TICKS
-  return false
+    taken = taken + 1
+    if units ~= nil then
+      if taken >= units then return false end
+    elseif not clock or clock() - start >= SCAN_BUDGET_TICKS then
+      return false
+    end
+  end
 end
 
 -- The scan to its end in one call. Only for a build that has no overlay to report it with.
@@ -601,15 +646,20 @@ function M.wakeup(ctx)
   if type(ctx) == "table" and type(ctx.requestRebuild) == "function" then
     state.requestRebuild = ctx.requestRebuild
   end
+  local widgetCall = inWidgetCall()
+  -- The units of log walk this wakeup may still spend, in the reading block and the busy block
+  -- below together where the call is a widget's.
+  local graphTicks = widgetCall and GRAPH_TICKS_PER_WIDGET_WAKEUP or GRAPH_TICKS_PER_WAKEUP
 
   -- The scan walks three directory trees and opens every candidate whose name carries no date
   -- and time. Done in one call -- in M.build or in one wakeup -- the tool stands still until the
   -- walk is over, however many logs the card holds. So the build that asks for it draws the
   -- notice and each wakeup spends SCAN_BUDGET_TICKS on it -- the same shape this page already
   -- uses for reading a selected log -- and the notice is drawn again whenever what it counts
-  -- has moved.
+  -- has moved. Hosted, the wakeup spends a number of units on it instead (see
+  -- SCAN_UNITS_PER_WIDGET_WAKEUP).
   if state.scan then
-    if scanForAWhile(state.scan) then
+    if scanForAWhile(state.scan, widgetCall and SCAN_UNITS_PER_WIDGET_WAKEUP or nil) then
       state.logsList = state.scan.found
       state.scan = nil
       state.scanShown = nil
@@ -653,10 +703,11 @@ function M.wakeup(ctx)
         Graph.open(state.selectedFilePath, { stats = true })
       end
 
-      for _ = 1, GRAPH_TICKS_PER_WAKEUP do
+      for _ = 1, graphTicks do
         if Graph.tick() then break end
         if not Graph.isBusy() then break end
       end
+      if widgetCall then graphTicks = 0 end
 
       if not Graph.isBusy() then
         state.summary = Graph.getSummary()
@@ -674,9 +725,9 @@ function M.wakeup(ctx)
   -- the build drew is on the screen while the log is being walked. A few units
   -- per wakeup rather than one: the unit is sized so that it cannot stall a
   -- frame, and a long log would otherwise take longer to index than to read.
-  if Graph and Graph.isBusy() then
+  if Graph and Graph.isBusy() and graphTicks > 0 then
     local redraw = false
-    for _ = 1, GRAPH_TICKS_PER_WAKEUP do
+    for _ = 1, graphTicks do
       if Graph.tick() then
         redraw = true
         break

@@ -81,7 +81,7 @@ of these settings it has, and one it does not report is not drawn.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 - [XDFly](https://www.xdfly.com/) -- what each of these settings does inside the ESC, and
   the manuals for the individual ESC models.
 

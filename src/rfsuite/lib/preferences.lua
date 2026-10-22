@@ -127,8 +127,10 @@ local SCHEMA = {
       rate_profile = true,
       esc_temperature = false,
       esc_threshold = 90,
+      esc_critical = 110,
       mcu_temperature = false,
       mcu_threshold = 80,
+      mcu_critical = 95,
       lq_alert = false,
       lq_warn = 70,
       lq_critical = 50,
@@ -146,23 +148,29 @@ local SCHEMA = {
   },
   audio = {
     keys = {
-      -- WAV volume level passed to playFile / playNumber. 0 = radio default (today's behaviour),
-      -- 1..5 = every RFSuite callout at that explicit level.
+      -- WAV volume level passed to playFile / playNumber in the Callout level mode. 0 = radio
+      -- default, 1..5 = every RFSuite callout at that explicit level.
       level                = 0,
-      -- When set, `level` applies only while a model is connected, so bench work
-      -- and menu interaction stays at the radio's own volume.
+      -- The connected-only switch of a file written before `connected_only` existed: `level`
+      -- applied only while a model is connected. Read only while `connected_only` is absent.
       level_connected_only = false,
-      -- Global variable that carries the master level for layer B. 0 = off (the default);
-      -- otherwise 1..9 (the GV slot on the radio). With a matching logical switch and
-      -- special function on the model, this lets the suite override the pot while flying
-      -- and release it on disconnect.
+      -- Global variable that carries the master level in the Master volume mode. 0 = off (the
+      -- default); otherwise 1..15 (the GV slot on the radio; 9 on most boards). With a matching
+      -- input, logical switch and special function on the model, this lets the suite override
+      -- the pot while flying and release it on disconnect.
       master_gvar          = 0,
       -- The master level written to the GVAR while connected and no critical alert is active.
       master_normal        = 80,
       -- The master level written to the GVAR while a sustained critical alert is active
-      -- (low voltage, ESC over-temperature, empty tank).
+      -- (low voltage, the ESC or MCU temperature at its critical level, empty tank).
       master_alert         = 100,
     },
+    -- `volume_mode` (0 off, 1 callout level, 2 master volume) and `connected_only` (for either
+    -- mode) carry no default on purpose: a file without them is read the way the suite used
+    -- `level` and `master_gvar` before the page offered one mode, and lib/audio_volume.lua is
+    -- where that reading lives. The page writes `volume_mode` on its first save, `connected_only` once
+    -- it is set or saved in one of the two modes.
+    optional = { "volume_mode", "connected_only" },
   },
   flightlog = {
     keys = {

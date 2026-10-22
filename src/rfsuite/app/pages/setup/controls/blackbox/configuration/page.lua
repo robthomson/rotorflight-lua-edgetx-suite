@@ -815,6 +815,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second save beside the running one
+  -- would write the configuration twice, with two EEPROM writes.
+  if ui.saving then return false end
   local ok, err = queueBlackboxWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -829,6 +832,9 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- The debug settings are sent only once the configuration write is answered, from what the
+  -- page holds then; a Reload under the save would put the board's old values there.
+  if ui.saving then return true end
   local session = getSession()
   if session then
     ui.dirty = false
@@ -865,6 +871,11 @@ function M.onClose()
   ConfirmDialog = nil
   ApiVersion = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

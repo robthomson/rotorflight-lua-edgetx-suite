@@ -46,9 +46,11 @@ local HEAP_REPORT_INTERVAL_SECONDS = 30
 local USE_LONG_FLUSH_CADENCE = true
 
 -- How long the dashboard widget's heartbeat may stand still before this script writes down that
--- it has stopped. It has to outlast the slowest legitimate gap -- a widget is not called at all
--- while another screen page is in front, and a build pass is long -- so it is generous: what is
--- being recorded is a widget that is GONE, not one that is busy.
+-- it has stopped. The widget bumps it from refresh() on screen and from background() off it -- on
+-- another screen page or behind one of the radio's menu pages -- so it stands still only while the
+-- radio is not calling the widget at all. It has to outlast the slowest legitimate gap, and a build
+-- pass is long, so it is generous: what is being recorded is a widget that is GONE, not one that is
+-- busy.
 local WIDGET_STALE_SECONDS = 3.0
 
 local lastPreferencesLoad = nil

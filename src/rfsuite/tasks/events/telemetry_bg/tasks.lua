@@ -3,6 +3,7 @@ local M = {}
 local Drain = nil
 local Smart = nil
 local Adjustments = nil
+local tellerAside = false
 
 local function loadModule(path)
   local fullPath = "/SCRIPTS/TOOLS/rfsuite-core/" .. path
@@ -82,8 +83,20 @@ function M.wakeup(carry)
 
     -- After the decode, never before it: what the teller reads is what the drain has just
     -- published, so the other order would announce one pass behind.
-    if not remote and Adjustments and type(Adjustments.wakeup) == "function" then
-        Adjustments.wakeup()
+    --
+    -- The teller is reset when it steps aside, so that when it takes over again it starts as a
+    -- new teller does: a report still standing at that moment is one the script has already
+    -- announced, and only a new teller joins it without a word.
+    if remote then
+        if not tellerAside and Adjustments and type(Adjustments.reset) == "function" then
+            Adjustments.reset()
+        end
+        tellerAside = true
+    else
+        tellerAside = false
+        if Adjustments and type(Adjustments.wakeup) == "function" then
+            Adjustments.wakeup()
+        end
     end
 end
 

@@ -47,6 +47,6 @@ Read-only while the model is armed.
 
 - [Saving configuration](../../../reference/saving.md) — the save that restarts the flight
   controller, and what a different flight controller does to an open page.
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

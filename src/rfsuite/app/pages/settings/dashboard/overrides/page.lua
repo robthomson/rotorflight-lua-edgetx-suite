@@ -137,7 +137,8 @@ end
 -- is not involved: a reset is saved the moment it is pressed.
 local function saveModel(i18n)
   local session = getSession()
-  local ok, err = false, "model_preferences"
+  -- A module that will not load answers as saveByMcuId does when it has no store: "unavailable".
+  local ok, err = false, "unavailable"
   local chunk = loadScript("/SCRIPTS/TOOLS/rfsuite-core/lib/model_preferences.lua", "t")
   if type(chunk) == "function" then
     local loaded, MP = pcall(chunk)
@@ -148,7 +149,7 @@ local function saveModel(i18n)
   if ok then
     ui.notice = t(i18n, "reset_saved", "Saved")
   else
-    ui.notice = t(i18n, "save_error_message", "Save failed") .. ": " .. tostring(err or "io")
+    ui.notice = t(i18n, "save_error_message", "Save failed") .. ": " .. Common.saveFailureReason(i18n, err, true)
   end
   ui.runtime.markDirty()
 end

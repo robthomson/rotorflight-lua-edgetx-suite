@@ -339,6 +339,22 @@ end
 -- Reading the board
 -- ---------------------------------------------------------------------------
 
+--- Hold the record that has just come in against its cell of the set, and nothing else.
+--
+-- The comparison is taken one slot per reply rather than whole after the last one. Opened from the
+-- dashboard, this page runs inside the widget's call, and the reply that ends the read-back is
+-- handled in a pass of that call: the whole comparison there is some nine thousand instructions on
+-- top of the pass, where the widget itself takes it a slice at a time (inflight/prime.lua). The
+-- records are asked for in the order of the set's own cells (startVerify), so the slot that has
+-- just arrived is the cell the comparison stands before; if it ever is not, the slot is left for
+-- the end of the read-back, which finishes whatever is left.
+local function compareArrived(run, slot)
+  local work = run.comparison
+  if type(work) ~= "table" then return end
+  local cell = work.slots[work.at + 1]
+  if cell ~= nil and cell.slot0 + 1 == slot then Functions.compareStep(work, 1) end
+end
+
 --- One record of the READ-BACK. The only place in this module that asks 156 for anything.
 local function sendVerifyRead(run, handlers, slot)
   local queue = queueOf()
@@ -359,6 +375,7 @@ local function sendVerifyRead(run, handlers, slot)
       local parsed = api.parse(buf)
       local decoded = type(parsed) == "table" and parsed.adjustment_range or nil
       if type(decoded) == "table" then run.verifyRecords[slot] = decoded end
+      compareArrived(run, slot)
       run.done = run.done + 1
       run.slotAt = run.slotAt + 1
       -- The counters move here and the next record goes out from the same reply; whether anything
@@ -710,16 +727,14 @@ end
 function M.stepVerify(run, handlers)
   local slot = run.slotList[run.slotAt]
   if slot == nil then
-    local settings = run.settings or {}
-    -- Held against the set the write was built from, STEPS INCLUDED. The step is one of the
-    -- fields recordMatches compares and one of the fields the write puts in the record, so a
-    -- comparison that does not name the pair falls back on functions.lua's own defaults and
-    -- reports every slot written with any other step as a difference -- thirty-five of thirty-six
-    -- on a board this very run has just written byte for byte. buildPlan names them at the same
-    -- two keys; a read-back that named fewer would be measuring a different set.
-    local steps = { step = settings.step, step_headspeed = settings.step_headspeed }
-    local result = Functions.compare(run.verifyRecords, run.map, settings.bank_ch, settings.value_ch,
-      steps)
+    -- The replies have compared their own slots as they came in (compareArrived); what is left
+    -- here is nothing on an ordinary read-back, and the verdict.
+    local result = nil
+    if run.comparison ~= nil then
+      local _
+      _, result = Functions.compareStep(run.comparison, nil)
+    end
+    run.comparison = nil
     run.report = {
       written = run.written,
       verdict = (result and result.verdict) or "unmapped",
@@ -754,6 +769,19 @@ function M.startVerify(run, handlers)
     run.slotList[i] = run.plan.slots[i].slot0 + 1
   end
   run.slotAt = 1
+  local settings = run.settings or {}
+  -- Held against the set the write was built from, STEPS INCLUDED. The step is one of the
+  -- fields recordMatches compares and one of the fields the write puts in the record, so a
+  -- comparison that does not name the pair falls back on functions.lua's own defaults and
+  -- reports every slot written with any other step as a difference -- thirty-five of thirty-six
+  -- on a board this very run has just written byte for byte. buildPlan names them at the same
+  -- two keys; a read-back that named fewer would be measuring a different set.
+  --
+  -- Prepared here and run a slot per reply, against the table the replies fill. nil where the
+  -- configured channels have no field on this receiver map, which the verdict reports as such.
+  local steps = { step = settings.step, step_headspeed = settings.step_headspeed }
+  run.comparison = Functions.newComparison(run.verifyRecords, run.map, settings.bank_ch,
+    settings.value_ch, steps)
   callHandler(handlers, "onProgress", run)
   return M.stepVerify(run, handlers)
 end

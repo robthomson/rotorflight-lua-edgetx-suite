@@ -1,15 +1,15 @@
 local M = {}
 
 M.MAJOR = 0
-M.MINOR = 1
-M.PATCH = 7
+M.MINOR = 2
+M.PATCH = 1
 
 M.VERSION = M.MAJOR .. "." .. M.MINOR .. "." .. M.PATCH
 
 -- Keep supported protocol targets centralized with app versioning.
--- New Lua package is intended for the latest MSP API version only.
+-- The first entry is the oldest MSP API version the suite connects to: 12.09 is Rotorflight 4.6.
+-- A board answering an older version (12.08 is Rotorflight 4.5) is refused on connect.
 M.SUPPORTED_MSP_API_VERSIONS = {
-  "12.08",
   "12.09",
   "12.10",
 }

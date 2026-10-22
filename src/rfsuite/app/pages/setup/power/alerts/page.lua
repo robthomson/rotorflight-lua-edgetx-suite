@@ -75,11 +75,11 @@ local function pageText(i18n, key, fallback)
 	return fallback
 end
 
-local function optionalPageHelpText(i18n, key)
-	local value = pageText(i18n, key, nil)
-	if type(value) ~= "string" or value == "" then return nil end
-	if string.sub(value, 1, 10) == "app.pages." then return nil end
-	return value
+-- The reason after a failed write of the model's file, in words (settings/common.lua). The page
+-- also runs without common.lua when that does not load, and the store's own answer stands in then.
+local function modelSaveReason(i18n, err)
+	if Common and Common.saveFailureReason then return Common.saveFailureReason(i18n, err, true) end
+	return tostring(err or "io")
 end
 
 local function getSession()
@@ -148,7 +148,7 @@ end
 
 local function saveModelPreferences(session)
 	if not PowerModelPreferences or type(PowerModelPreferences.save) ~= "function" then
-		return false, "model_preferences_unavailable"
+		return false, "unavailable"
 	end
 	return PowerModelPreferences.save(session)
 end
@@ -265,8 +265,8 @@ function M.onSave(ctx)
 	if not okPrefs then
 		if ctx and type(ctx.reportSave) == "function" then
 			ctx.reportSave({
-				title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
-				message = pageText(ctx and ctx.i18n, "save_error_message", "Save failed") .. ": " .. tostring(errPrefs or "io")
+				title = pageText(ctx.i18n, "save_error_title", "Error"),
+				message = pageText(ctx.i18n, "save_error_message", "Save failed") .. ": " .. modelSaveReason(ctx.i18n, errPrefs)
 			})
 		end
 		return false
@@ -327,7 +327,7 @@ function M.build(ctx)
 			get = function() return ui.config.flighttime end,
 			set = getFlightTimeSetter(),
 			display = formatSeconds,
-			helpText = optionalPageHelpText(i18n, "help_timer"),
+			helpText = pageText(i18n, "help_timer"),
 			helpTitle = pageText(i18n, "timer", "Timer"),
 			onHelp = getInlineHelpHandler()
 		}
@@ -340,7 +340,7 @@ function M.build(ctx)
 		ui.config.alert_type,
 		getAlertTypeSetter(),
 		{
-			helpText = optionalPageHelpText(i18n, "help_alert_type"),
+			helpText = pageText(i18n, "help_alert_type"),
 			helpTitle = pageText(i18n, "alert_type", "Alert Type"),
 			onHelp = getInlineHelpHandler()
 		}
@@ -355,7 +355,7 @@ function M.build(ctx)
 			get = function() return ui.config.becalertvalue end,
 			set = getBecAlertSetter(),
 			display = formatDeciVolts,
-			helpText = optionalPageHelpText(i18n, "help_bec_voltage_alert"),
+			helpText = pageText(i18n, "help_bec_voltage_alert"),
 			helpTitle = pageText(i18n, "bec_voltage_alert", "BEC Voltage Alert"),
 			onHelp = getInlineHelpHandler()
 		}
@@ -370,7 +370,7 @@ function M.build(ctx)
 			get = function() return ui.config.rxalertvalue end,
 			set = getRxAlertSetter(),
 			display = formatDeciVolts,
-			helpText = optionalPageHelpText(i18n, "help_rx_voltage_alert"),
+			helpText = pageText(i18n, "help_rx_voltage_alert"),
 			helpTitle = pageText(i18n, "rx_voltage_alert", "RX Voltage Alert"),
 			onHelp = getInlineHelpHandler()
 		}
@@ -388,6 +388,11 @@ function M.onClose()
 	Common = nil
 	PowerModelPreferences = nil
 	t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+	return ui.dirty == true
 end
 
 return M

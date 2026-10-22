@@ -8,7 +8,7 @@ sidebar_label: Sensor selection
 The suite asks for values by what they are -- fuel, voltage, headspeed, current, link quality --
 and the radio holds telemetry sensors with four-character names. This page is what sits between
 the two: how a value is matched to one of the model's sensors, how long that choice lasts, and
-why a sensor the radio has never sent is not taken for a reading of zero.
+why a sensor the radio is not receiving is not taken for a reading.
 
 It applies everywhere a telemetry value is used: the dashboard widget, the audio announcements,
 the flight log and the flight record.
@@ -16,19 +16,21 @@ the flight log and the flight record.
 ## Choosing a sensor
 
 Each value has a list of sensor names, most preferred first -- fuel is looked for as `Bat%`,
-then `Fuel`, then `fuel`. The list is tried in order and the first name that answers is taken.
-That choice is then remembered, so later passes read the chosen sensor directly instead of
-searching again.
+then `Fuel`, then `fuel`. The list is tried in order and the first name the radio is receiving
+is taken. That choice is then remembered, so later passes read the chosen sensor directly instead
+of searching again.
 
 Where a value has been matched to something other than the first name on its list, the first name
-is re-tried every few seconds, and the value moves back to it as soon as it starts answering.
+is re-tried every few seconds, and the value moves back to it as soon as it is arriving.
 That covers a sensor which appears late -- the flight controller's own values arrive a moment
 after the link comes up, and two of them the suite publishes itself.
 
 A value the model carries no sensor for at all -- no altimeter, no BEC voltage, no ESC
 temperature -- would otherwise be searched for on every pass, for the whole flight. Those searches
 are spaced out instead: the first retry comes after about two seconds and the wait doubles up to
-half a minute.
+half a minute. A value whose sensor the model does carry but the radio is not receiving at the
+moment -- the link is down, or the flight controller has stopped sending -- stays on the two-second
+retry, so it is picked up again within about two seconds of coming back.
 
 ## Asking for a sensor by its own name
 
@@ -47,7 +49,9 @@ suite's, so they cover everything received since the radio last reset telemetry 
 was loaded, when the radio was switched on, or on *Reset Telemetry* -- and not one flight.
 [Flight statistics](flight-statistics.md) are the per-flight ones. One oddity is worth knowing:
 on a **voltage** sensor the radio resets the minimum whenever a new maximum arrives, on the
-assumption that a higher voltage means a fresh battery.
+assumption that a higher voltage means a fresh battery. A minimum or maximum stays a valid figure
+after its sensor has stopped arriving, so it is taken whenever the sensor has arrived at all since
+that reset.
 
 **The link statistics are the radio's sensors, not the flight controller's.** The CRSF driver
 creates them from the link frames themselves, so they are there on every model flown on a
@@ -74,37 +78,88 @@ later; 2.12.2 and earlier declared the three signal strengths in dB. The flight 
 custom sensors are a separate set and are described under
 [telemetry sensors](telemetry-sensors.md).
 
-## Why a sensor the radio has never sent is not a reading of zero
+## Why a sensor the radio is not receiving is not taken for a reading
 
 A model keeps the sensors it has ever seen. Load a model that flew with a sensor the radio is no
 longer receiving -- the value was switched off in the flight controller's telemetry set, an ESC
 that is not on the bus today, a receiver that has not been powered up -- and the row is still
 there in *Model* -> *Telemetry*, with nothing to say it is stale.
 
-Asked for such a row, the radio answers **zero**, not "no value". Zero is a perfectly good
-reading, so a stale row can be mistaken for a working sensor that happens to read nothing, and the
-value then stays at zero for as long as the model is loaded. For fuel that is the number the
-SmartFuel calculation publishes, the callouts speak and the flight log records.
+Asked for such a row, the radio answers **zero**, not "no value". A sensor that did arrive and then
+stopped -- an ESC that dropped off the bus, a value switched off in the flight controller -- keeps
+answering its **last value** for as long as the model stays loaded, and while the link is down
+every sensor answers zero. Each of those is a plausible reading, so a dead row can be mistaken for
+a working sensor. For fuel that is the number the SmartFuel calculation publishes, the callouts
+speak and the flight log records.
 
-The suite therefore asks a second question of any sensor reading zero, and takes the reading only
-where the radio has actually received that sensor. A row that has never arrived is treated as
-missing rather than as zero.
+The suite therefore asks the radio, before it takes a sensor for a value, whether that sensor is
+still arriving -- whatever it reads, zero or not. A row that has never arrived, or that has stopped
+arriving, is treated as missing, and the next name on the list is tried.
 
-**What that question can and cannot separate.** It separates *"nothing has arrived for this sensor
-since the model was loaded"* from *"something has"*. It does **not** tell a sensor that fell silent
-a moment ago from one that is still arriving: a sensor which stops mid-flight keeps its last
-reading, and a link that drops does not undo what has already arrived. That is the radio's own
-behaviour, not something the suite can see behind.
+**What that question can and cannot separate.** The radio keeps a timeout for every sensor: a
+sensor counts as stopped once nothing has arrived for it for **20 seconds** -- the same timeout
+behind the radio's *Sensor lost* announcement -- and every sensor counts as stopped about a second
+after the link drops, until its next value arrives. Within those 20 seconds a sensor that has
+just fallen silent cannot be told from one that is still arriving; that is the radio's resolution,
+not something the suite can see behind. The suite's own decoder passes an unchanged value on again
+at least every two seconds while frames carrying it arrive, so a value that simply holds still -- a
+profile number, 0 A on the ground -- never reads as stopped.
+
+The question is asked when a value is matched to a sensor, not on every read after that. A sensor
+that stops **after** it was matched keeps its last reading until the choice is made again (below).
+
+One case is narrowed rather than closed: a script that writes a sensor row before anything has
+arrived makes it look like an arriving sensor for those 20 seconds. The suite does not do that
+itself, but Rotorflight's RFTool background script, on a model that carries it, writes a zero into
+every sensor the flight controller is configured to send as soon as it connects. Such a row is
+taken if a value is matched to it within 20 seconds of that, and refused after.
 
 ## What you will see
 
-- **The fuel callout** says nothing for a fuel row the radio is not sending, where it used to
-  announce 0 %.
+- **The fuel callout** says nothing for a fuel row the radio is not receiving, where it used to
+  announce 0 %, or the last percentage of a fuel sensor that had stopped.
 - **The flight log** leaves its minimum-fuel columns empty for such a flight instead of filling
-  them with a zero that was never measured.
-- **The dashboard is unchanged.** Every telemetry value it keeps starts at zero and is only
-  overwritten by a reading that arrived, so a value with no sensor behind it shows `0` there
-  before and after. Making those tiles show `--` is a separate gate and this is not it.
+  them with a value that was never measured.
+- **A value with a second sensor that is arriving** is matched to that one rather than to a first
+  one that has stopped.
+- **The dashboard** still shows `0` for a value with no sensor behind it: every telemetry value it
+  keeps starts at zero and is only overwritten by a reading that arrived. A sensor that had already
+  stopped when the dashboard matched its values is now treated the same way, where its last value
+  used to be shown. Making those tiles show `--` is a separate gate and this is not it.
+
+## When two sensors have the same name
+
+A sensor name is not unique on the radio. The case that happens: the native CRSF battery frame
+creates `RxBt`, `Curr`, `Capa` and `Bat%`, and a model whose sensors were discovered while the
+flight controller was still on its default native telemetry keeps those four after it is switched
+to custom telemetry -- above the flight controller's own `Curr`, `Capa` and `Bat%` in *Model* ->
+*Telemetry*. Asked for a name, the radio answers with the **first** sensor of that name, so fuel,
+current and consumption would come from the native rows, which no longer receive anything: no
+value at all, or the last one they received, frozen.
+
+So where a name is carried by more than one sensor, the suite reads the one the radio is receiving:
+the first of them, in the order of *Model* -> *Telemetry*, that the radio counts as current; if
+none is, the first that has received anything since the model was loaded. The radio counts a
+sensor as current until about 20 seconds after its last value, and none once the link has stopped.
+The choice is made on every read, so it follows the radio: when the native rows stop being current,
+the values move to the flight controller's rows by themselves.
+
+- **The first sensor wins while both are current**, so a model on native telemetry reads the native
+  rows, as it always did -- and for up to 20 seconds after the native rows last received something.
+- **Only a model that carries `RxBt` is looked at.** `RxBt` is the radio's own receiver battery
+  sensor, which the native telemetry creates and the suite never does. On such a model the suite
+  lists the model's sensors about two seconds after each connection, and again when a search meets
+  a sensor that has never received anything while one has been added since; a model without
+  `RxBt` reads every name as before.
+- **A sensor added after that list is noticed by a search.** On a model that meets custom
+  telemetry for the first time while the native rows still hold a value -- the telemetry mode
+  changed with the radio left on -- the values stay on the native rows until the next connection.
+- The **session minimum and maximum** (`Curr+`, `Bat%-`) follow the same sensor.
+
+Deleting the native rows in *Model* -> *Telemetry* removes the question altogether.
+
+The [validate sensors](../pages/tools/diagnostics/validate_sensors.md) page is not part of this: it
+asks the radio for each name itself and grades the first sensor of that name.
 
 ## When the choice is made again
 
@@ -117,18 +172,21 @@ because they are not the same event:
   and the arming state is not held back -- so after a reconnect the dashboard's values appear
   over about two seconds rather than all on the first read, and somewhat later where other
   readers in the same pass start searches of their own. The same applies when the widget starts.
-- **The configuration tool** forgets the choice on every audio tick (five times a second) for as
-  long as it does not consider the connection ready -- no link quality, no battery reading, or
-  no flight controller answering -- and so matches again from the top each time. Once it is
-  ready, the choice stays until that test fails again.
+- **The configuration tool** forgets the choice once, on the audio tick where it stops
+  considering the connection ready -- no link quality, no battery reading, or no flight
+  controller answering. While it waits it keeps reading link quality, voltage and fuel on every
+  audio tick (five times a second); a sensor the model carries is searched for on the
+  two-second retry described above, so it is found again within about two seconds of the link
+  coming back. Once it is ready, the choice stays until that test fails again.
 - **The radio's own telemetry reset** -- which happens when a model is loaded, when the radio is
-  switched on, and on *Reset Telemetry* -- is what puts the sensor rows themselves back to "never
-  received". That is the event the zero test above is measured against.
+  switched on, and on *Reset Telemetry* -- puts the sensor rows themselves back to "never
+  received".
 
-A link that merely drops does neither of those to the rows: what has already been received stays
-received until one of the resets above. So a model flown with a different ESC, or with a value
-switched on since, picks up the right sensor when it is next loaded rather than in the middle of
-a session.
+A link that drops does not reset the rows, but it makes every one of them count as stopped until
+its next value arrives, so a value matched while the link is down finds nothing and is searched
+for again. A sensor that stopped in the middle of a session is refused the next time the choice is
+made. So a model flown with a different ESC, or with a value switched off since, picks up the
+right sensor at the next match rather than only when the model is next loaded.
 
 ## Related
 

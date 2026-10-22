@@ -41,6 +41,14 @@ function M.wakeup(args)
 
   if requestSent then return end
 
+  -- The craft name in the session is the previous board's until this read answers. The runner
+  -- drops this module without its reset() once the task is complete, so nothing else clears it
+  -- between two boards; it goes here, as this board's read starts, so a read that fails leaves no
+  -- name rather than the previous craft's for model_name_sync to write onto the model. Not at the
+  -- connect edge: a reconnect while armed runs no connect task until the disarm, and the name of
+  -- the same craft has to stay for that flight.
+  session.modelName = nil
+
   -- MSP name API laden
   if not NameApi then
     NameApi = loadModule("tasks/msp/api/name.lua")

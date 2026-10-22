@@ -51,6 +51,6 @@ A sensor that has no current value reads `-`.
 
 - [SmartFuel](../../setup/power/smartfuel.md) — where the flight controller's estimate is set.
 - [Custom telemetry sensors](../../../reference/telemetry-sensors.md) — what `SmFt` and `SmCp` are
-- [Rotorflight documentation: SmartFuel](https://www.rotorflight.org/docs/setup/smartfuel)
+- [Rotorflight documentation: SmartFuel](https://doc.rotorflight.org/setup/smartfuel/)
 
 *Documented against RFSuite 0.1.7.*

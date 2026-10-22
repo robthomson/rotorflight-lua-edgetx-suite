@@ -291,38 +291,14 @@ end
 ---
 --- The `RFMD` byte means different rates on ExpressLRS 3.x and 4.x and does not say which, so
 --- the module is asked: one device ping, and the device-information frame it answers with names
---- the release (lib/link_rates.lua). Only a theme that declares one of the two rate sources ever
---- gets here, and only once the link is up and `RFMD` has a reading, so a theme without them, a
---- link that is down and a link that carries no link statistics send nothing.
----
---- lib/crsf.lua is the one frame multiplexer of this Lua state: asking it for 0x29 before the
---- ping is what makes it keep the answer when another consumer drains the queue first, and it
---- keeps every other consumer's frames while this one drains.
+--- the release. The rule is lib/link_rates.lua's (`resolveGeneration`), which the audio
+--- announcements run on the same state, so a theme and an announcement on this widget share one
+--- answer and one ping. Only a theme that declares one of the two rate sources gets here, and
+--- only once the link is up and `RFMD` has a reading, so a theme without them, a link that is
+--- down and a link that carries no link statistics send nothing from here.
 local function linkGeneration(state, rates)
   if state.linkGeneration ~= nil then return state.linkGeneration end
-  local crsf = getCrsfModule()
-  if not (crsf and type(crsf.popFrame) == "function") then return nil end
-  while true do
-    local data = crsf.popFrame(rates.FRAME_DEVICE_INFO)
-    if data == nil then break end
-    local generation = rates.generationFromDeviceInfo(data)
-    if generation ~= nil then
-      state.linkGeneration = generation
-      return generation
-    end
-  end
-  local push = _G.crossfireTelemetryPush
-  if state.linkPingSent or type(push) ~= "function" then return nil end
-  local ok, queued = pcall(push, rates.FRAME_DEVICE_PING, rates.PING_PAYLOAD)
-  if not ok then return nil end
-  -- Nil is EdgeTX saying no module runs the CRSF protocol, so nothing will answer and nothing
-  -- ExpressLRS is there. False is a full output buffer, which the next pass tries again.
-  if queued == nil then
-    state.linkGeneration = 0
-    return 0
-  end
-  if queued == true then state.linkPingSent = true end
-  return nil
+  return rates.resolveGeneration(state, getCrsfModule(), _G.crossfireTelemetryPush)
 end
 
 --- What the link is running, as a row of lib/link_rates.lua, or nil.

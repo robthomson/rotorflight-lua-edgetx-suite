@@ -134,7 +134,7 @@ local function queueScorpionReadActual(queue, retryOnError)
         -- Hundredths of an amp in the block, which is the unit the row on this page displays
         -- and divides by; the store keeps whole amps.
         if session and EscCurrentLimit then
-          EscCurrentLimit.remember(session, (tonumber(ui.config.max_current) or 0) / 100)
+          EscCurrentLimit.remember(session, (tonumber(ui.config.max_current) or 0) / 100, "scorpion")
         end
         if session then
           session.setup_esc_motors_esc_tools_scorp = {
@@ -202,8 +202,13 @@ end
 -- an ordinary situation has to be a translated key, not a code token. A save before the ESC
 -- has been read is exactly that: an ESC that did not answer, a reply that was refused, or a
 -- page saved before the read came back.
+--
+-- Each entry is a labelKey/labelFallback pair because the packager translates that pair in
+-- place: the fallback an installed suite carries is then already in the pilot's language. A
+-- key that only reaches the lookup at the call is never translated, and the notice would ship
+-- in English in every language.
 local MESSAGE_KEYS = {
-  esc_not_read = { "save_error_not_read", "Read the ESC before saving." }
+  esc_not_read = { labelKey = "save_error_not_read", labelFallback = "Read the ESC before saving." }
 }
 
 local function queueScorpionWrite(requestRebuild)
@@ -356,13 +361,14 @@ function M.onSave(ctx)
   local ok, err = queueScorpionWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
+      local i18n = ctx.i18n
       local mapped = MESSAGE_KEYS[err]
       local message = tostring(err or "MSP write failed")
       if mapped then
-        message = pageText(ctx and ctx.i18n, mapped[1], mapped[2])
+        message = pageText(i18n, mapped.labelKey, mapped.labelFallback)
       end
       ctx.reportSave({
-        title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
+        title = pageText(i18n, "save_error_title", "Error"),
         message = message
       })
     end
@@ -412,7 +418,7 @@ function M.build(ctx)
   end
 
   if ui.loading or ui.saving then
-    local titleText = ui.loading and pageText(i18n, "loading", "Loading") or pageText(i18n, "saving", "Saving")
+    local titleText = ui.loading and pageText(i18n, "loading_title", "Loading") or pageText(i18n, "saving_title", "Saving")
     local msgText = ui.loading and pageText(i18n, "loading_data", "Loading ESC parameters...") or pageText(i18n, "saving_data", "Saving ESC parameters...")
     if LoadingOverlay and type(LoadingOverlay.append) == "function" then
       LoadingOverlay.append(children, {
@@ -548,7 +554,9 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     rowH = Controls.appendNumberField(children, x, cursorY, w, pageText(i18n, "esc_bailout_time", "Bailout Time"), {
-      min = 0, max = 100000, step = 1000,
+      -- Bailout is a 16-bit count of milliseconds on the wire (esc_parameters_scorpion.lua),
+      -- so 65 s is the last whole second it holds; 66 s and up would wrap to under 35 s.
+      min = 0, max = 65000, step = 1000,
       display = function(val) return string.format("%ds", math.floor(val / 1000)) end,
       get = function() return ui.config.bailout end,
       set = function(val)
@@ -699,6 +707,11 @@ function M.onClose()
   ScorpInit = nil
   EscCurrentLimit = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

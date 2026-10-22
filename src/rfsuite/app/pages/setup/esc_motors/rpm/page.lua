@@ -456,8 +456,11 @@ function M.build(ctx)
     children, x, cursorY, w,
     pageText(i18n, "motor_pole_count", "Motor Pole Count"),
     {
+      -- MSP_SET_MOTOR_CONFIG carries the pole count as one byte, so 254 is the largest even
+      -- count it holds; 256 would reach the flight controller as 0, which leaves the motor
+      -- without an RPM source.
       min = 2,
-      max = 256,
+      max = 254,
       step = 2,
       get = function() return ui.config.motor_pole_count_0 end,
       set = function(v)
@@ -532,6 +535,11 @@ function M.onClose()
   ConfirmDialog = nil
   ApiVersion = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

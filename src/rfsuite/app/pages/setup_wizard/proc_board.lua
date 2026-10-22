@@ -118,13 +118,24 @@ procs[#procs + 1] = {
   title = function(i18n) return t(i18n, "step_alignment", "Orientation") end,
   enter = function(w)
     w.data.alignment = w.data.alignment or { loaded = false }
+    w.data.alignment.failed = nil
     w.msp.read("sensor_alignment", function(parsed)
-      local values = parsed and parsed.parsed or nil
+      -- The API returns the three fields flat. The write below sends all three back, so a read
+      -- that did not arrive is not a board at zero: the step stays unread and writes nothing.
+      local values = type(parsed) == "table" and (parsed.parsed or parsed) or nil
       local state = w.data.alignment
-      state.value = values and tonumber(values.gyro_1_alignment) or 0
+      local gyro1 = values and tonumber(values.gyro_1_alignment) or nil
+      if gyro1 == nil then
+        state.loaded = false
+        state.failed = true
+        w.rebuild()
+        return
+      end
+      state.failed = nil
+      state.value = gyro1
       state.original = state.value
-      state.gyro2 = values and tonumber(values.gyro_2_alignment) or 0
-      state.mag = values and tonumber(values.mag_alignment) or 0
+      state.gyro2 = tonumber(values.gyro_2_alignment) or 0
+      state.mag = tonumber(values.mag_alignment) or 0
       state.loaded = true
       w.rebuild()
     end)
@@ -138,6 +149,10 @@ procs[#procs + 1] = {
 
         y = y + w.paragraph(children, area.x, y, area.w, t(i18n, "alignment_intro", "Needed before the calibration: the flight controller mounted in the machine, and the machine level.")) + 8
 
+        if state.failed then
+          w.row(children, area.x, y, area.w, t(i18n, "field_orientation", "Orientation"), t(i18n, "state_unread", "could not be read"), nil)
+          return
+        end
         if not state.loaded then
           w.row(children, area.x, y, area.w, t(i18n, "field_orientation", "Orientation"), t(i18n, "state_reading", "reading..."), nil)
           return

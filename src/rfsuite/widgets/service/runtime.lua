@@ -326,6 +326,11 @@ local function readStatus(self)
   if MspRuntime and type(MspRuntime.getState) == "function" then
     local runtimeState = MspRuntime.getState()
     status.link = type(runtimeState) == "table" and runtimeState.lastConnected == true
+    -- A refused board gets no connect chain, so the chain's progress cannot say so: without
+    -- this the tile would read "Connected" for a board the suite does not talk to.
+    if type(runtimeState) == "table" and runtimeState.unsupportedApi == true then
+      status.refusedVersion = tostring(runtimeState.refusedApiVersion or "?")
+    end
   end
 
   if EventsRuntime and type(EventsRuntime.isOnconnectActive) == "function" then
@@ -354,6 +359,9 @@ local function readStatus(self)
   local mspErrorKind = (s and s.mspErrorKind) or (_G.rfsuite and _G.rfsuite.diagnostics and _G.rfsuite.diagnostics.mspErrorKind)
   if not status.link then
     status.text = (t and t("widgets.service.waiting_for_link")) or "Waiting for MSP link"
+  elseif status.refusedVersion then
+    local fmt = (t and t("widgets.service.api_unsupported")) or "MSP API %s not supported"
+    status.text = string.format(fmt, status.refusedVersion)
   elseif not status.tasksDone then
     if mspErrorKind == "no_reply" or (mspErr and mspErr ~= "") then
       status.text = (t and t("widgets.service.no_msp_reply")) or "No MSP reply"

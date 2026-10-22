@@ -12,7 +12,10 @@ The fixture carries both translation forms in one page, because that is what the
 regressions in it look like. A page-local pageText/t call must keep resolving against
 the page's own key block, and a cross-page Common.t call must resolve against the
 block it names -- without the generic pattern matching the "t(" inside "Common.t("
-first, which used to leave a name followed by a string literal behind.
+first, which used to leave a name followed by a string literal behind. A page-local
+call whose i18n argument is guarded -- pageText(ctx and ctx.i18n, ...) -- must resolve
+like the plain one; it used to be left as written and ship its English fallback. A
+fallback that is itself a marker must not be carried inside the new one.
 """
 
 import argparse
@@ -32,6 +35,8 @@ local a = Common.t(i18n, "setup_ports", "function_esc_sensor", "ESC Sensor")
 local b = Common.t(i18n, "setup_ports", "function_esc_sensor")
 local c = pageText(i18n, "own_key", "Own Fallback")
 local d = t(i18n, "plain_key", "Plain Fallback")
+local e = pageText(ctx and ctx.i18n, "guarded_key", "Guarded Fallback")
+local g = pageText(ctx and ctx.i18n, "nested_key", "@i18n(app.pages.setup_wizard.nested_key)@")
 """
 
 EXPECTED = """\
@@ -42,6 +47,8 @@ local a = "@i18n(app.pages.setup_ports.function_esc_sensor|ESC Sensor)@"
 local b = "@i18n(app.pages.setup_ports.function_esc_sensor)@"
 local c = "@i18n(app.pages.setup_wizard.own_key|Own Fallback)@"
 local d = "@i18n(app.pages.setup_wizard.plain_key|Plain Fallback)@"
+local e = "@i18n(app.pages.setup_wizard.guarded_key|Guarded Fallback)@"
+local g = "@i18n(app.pages.setup_wizard.nested_key)@"
 """
 
 # What the precompiler emitted for the same fixture while the generic pageText/t
@@ -58,7 +65,24 @@ local a = Common."@i18n(app.pages.setup_wizard.setup_ports|function_esc_sensor"_
 local b = Common."@i18n(app.pages.setup_wizard.setup_ports|function_esc_sensor)@"
 local c = "@i18n(app.pages.setup_wizard.own_key|Own Fallback)@"
 local d = "@i18n(app.pages.setup_wizard.plain_key|Plain Fallback)@"
+local e = "@i18n(app.pages.setup_wizard.guarded_key|Guarded Fallback)@"
+local g = "@i18n(app.pages.setup_wizard.nested_key)@"
 """
+
+# What the precompiler emitted for the same fixture while its i18n argument could only
+# be a name: the guarded call on line e was not rewritten, so a packaged build -- which
+# carries no locale bundle -- showed its English fallback in every locale. This is the
+# second red control.
+UNGUARDED = EXPECTED.replace(
+    '"@i18n(app.pages.setup_wizard.guarded_key|Guarded Fallback)@"',
+    'pageText(ctx and ctx.i18n, "guarded_key", "Guarded Fallback")')
+
+# A fallback that is itself a marker, carried inside the outer marker: the resolver
+# makes one pass, so a key missing from every bundle would put the inner marker on the
+# radio as text instead of stopping the build. The third red control.
+NESTED = EXPECTED.replace(
+    '"@i18n(app.pages.setup_wizard.nested_key)@"',
+    '"@i18n(app.pages.setup_wizard.nested_key|__AT__i18n__LPAREN__app.pages.setup_wizard.nested_key__RPAREN____AT__)@"')
 
 # A marker that has replaced the call part of a qualified name leaves the name and a
 # string literal side by side, which no Lua parser accepts.
@@ -108,8 +132,18 @@ def self_test():
         print("FAIL: the checks accept a page that does not compile")
         return 1
 
-    print("self-test ok: %d problem(s) reported for the earlier output, "
-          "none for the expected one" % len(problems))
+    unguarded = check(UNGUARDED)
+    if UNGUARDED == EXPECTED or not unguarded:
+        print("FAIL: the checks accept a page whose guarded call was not rewritten")
+        return 1
+
+    nested = check(NESTED)
+    if NESTED == EXPECTED or not nested:
+        print("FAIL: the checks accept a page that nests a marker inside a marker")
+        return 1
+
+    print("self-test ok: %d, %d and %d problem(s) reported for the three earlier outputs, "
+          "none for the expected one" % (len(problems), len(unguarded), len(nested)))
     return 0
 
 
@@ -129,7 +163,7 @@ def main():
             print(problem)
         return 1
 
-    print("ok: the page-local and the cross-page form both resolve, "
+    print("ok: the page-local, the guarded and the cross-page form all resolve, "
           "and the page compiles")
     return 0
 

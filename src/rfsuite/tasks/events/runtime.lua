@@ -53,6 +53,9 @@ end
 
 local CONNECT_STABLE_SECONDS = 0.6
 local DISCONNECT_STABLE_SECONDS = 2.0
+-- How long a link that came back after a loss in flight waits for an armed reading the radio has
+-- received since, before it is taken for a new session after all. See settleFlightAfterGap.
+local FLIGHT_CONFIRM_SECONDS = 5.0
 
 local state = {
   linkUpSince = nil,
@@ -61,6 +64,11 @@ local state = {
   lastArmed = nil,
   -- Which arm/disarm category still has work, if either does. See driveEdgeRunner below.
   edgeRunner = nil,
+  -- The link went down while the craft was armed, and the flight was kept rather than dropped.
+  flightKept = false,
+  -- The link is back after such a loss, and whether the craft is still flying is not known yet:
+  -- the time it came back, until settleFlightAfterGap decides.
+  flightPendingSince = nil,
 }
 
 -- The argument a runner's wakeup is called with. One table for every call rather than a
@@ -129,6 +137,60 @@ local function modelNameStore()
   return ModelNameStore
 end
 
+-- A link coming up is, as far as anything here can tell, a fresh pack and a fresh session, and
+-- that is what ends the record of the one before it: the statistics and the flight clock go, and
+-- the board's flight count is zeroed until the connect chain has read this board's. A record
+-- still open has no honest end to it and goes with them.
+local function endSession(session)
+  session.flightcount = 0
+  if FlightRecord and type(FlightRecord.reset) == "function" then
+    pcall(FlightRecord.reset)
+  end
+end
+
+-- A flight kept across a link loss that did not go on: what the disconnect and the connect edge
+-- would have done to it, done now. The flight log's entry goes with the record -- the craft
+-- disarmed somewhere in the gap, so there is no honest duration and no line. The arm-edge
+-- detector is reset as the disconnect resets it (#278), so a craft that is armed after all opens
+-- a record of its own from here.
+local function endKeptFlight(session)
+  session.flightlog = nil
+  endSession(session)
+  state.lastArmed = false
+end
+
+-- Whether a flight kept across a link loss went on. The armed state tick() reads is the one from
+-- before the loss until a decoder writes the arm sensor again, so it cannot say; a reading the
+-- radio has received since the link came back can (MspRuntime.armedReading). Armed: the same
+-- flight, and nothing is done. Disarmed: endKeptFlight. No such reading within
+-- FLIGHT_CONFIRM_SECONDS: endKeptFlight as well, which is what a reconnect did before a flight
+-- was kept at all.
+local function settleFlightAfterGap(t)
+  if state.flightPendingSince == nil then return end
+  local armed, current = nil, false
+  if MspRuntime and type(MspRuntime.armedReading) == "function" then
+    local ok, a, c = pcall(MspRuntime.armedReading)
+    if ok then armed, current = a, c end
+  end
+  local outcome
+  if current == true then
+    outcome = (armed == true) and "armed, the flight goes on" or "disarmed, the flight is not logged"
+  elseif (t - state.flightPendingSince) >= FLIGHT_CONFIRM_SECONDS then
+    outcome = "not confirmed, a new session"
+  else
+    return
+  end
+  local waited = t - state.flightPendingSince
+  state.flightPendingSince = nil
+  if current ~= true or armed ~= true then
+    endKeptFlight(_G.rfsuite.session)
+  end
+  if Log and type(Log.emit) == "function" then
+    pcall(Log.emit, "rfsuite.events",
+      string.format("link back after a loss in flight, after %.1fs: %s", waited, outcome), "info")
+  end
+end
+
 local function publishConnected(val)
   ensureSession()
   local session = _G.rfsuite.session
@@ -137,11 +199,21 @@ local function publishConnected(val)
   session.rfConnected = val
   if val == false then
     session.fblConnected = false
+    -- A link lost while the craft is armed is a craft still in the air as far as anything here
+    -- can tell -- the pack cannot have been swapped under a flying model -- so its flight is kept
+    -- rather than ended here: the flight log's entry, the arm-edge detector and, on the connect
+    -- edge below, the record and the flight count. Whether it really is the same flight is only
+    -- known once the link is back; settleFlightAfterGap decides it then.
+    local inFlight = state.lastArmed == true
+    state.flightKept = inFlight
+    state.flightPendingSince = nil
     -- The flight log's pending entry belongs to the connection: which battery was picked for it,
     -- and whether a use has already been counted against that pack. A link that comes back is, as
     -- far as anything here can tell, a fresh pack, so the entry is dropped rather than carried
-    -- into it. An entry still open goes with it -- nothing disarmed, so there is no honest duration.
-    session.flightlog = nil
+    -- into it -- unless the craft was flying when it went.
+    if not inFlight then
+      session.flightlog = nil
+    end
     -- The flight statistics and the board's flight count are deliberately NOT dropped here. The
     -- link going down is what unplugging the pack after a flight looks like, and the dashboard's
     -- post-flight page reads rfsuite.session.flight for its tiles: a reset at this edge blanked
@@ -166,16 +238,22 @@ local function publishConnected(val)
     -- `false` rather than `nil`: the nil-guard two lines above the edge condition silently
     -- initialises `state.lastArmed` to the current armed value without firing an edge, which
     -- would defeat the purpose of the reset.
-    state.lastArmed = false
+    --
+    -- A kept flight keeps its detector instead: the record is not reset on the reconnect, so
+    -- there is nothing to reopen, and the next edge is the flight's own disarm. Where the flight
+    -- turns out not to have gone on, endKeptFlight resets it then.
+    if not inFlight then
+      state.lastArmed = false
+    end
   end
   if val == true then
-    -- A link coming up is, as far as anything here can tell, a fresh pack and a fresh session,
-    -- and that is what ends the record of the one before it: the statistics and the flight clock
-    -- go, and the board's flight count is zeroed until the connect chain has read this board's.
-    -- A record still open has no honest end to it and goes with them.
-    session.flightcount = 0
-    if FlightRecord and type(FlightRecord.reset) == "function" then
-      pcall(FlightRecord.reset)
+    if state.flightKept then
+      -- The record, its clock and the flight count are left as they are until
+      -- settleFlightAfterGap knows whether the craft is still flying.
+      state.flightKept = false
+      state.flightPendingSince = nowSeconds()
+    else
+      endSession(session)
     end
   end
   if Log and type(Log.emit) == "function" then
@@ -244,6 +322,9 @@ function Events.reset()
   state.linkUpSince = nil
   state.linkDownSince = nil
   state.linkStableUp = false
+  -- A flight kept across a link loss belongs to the link this forgets.
+  state.flightKept = false
+  state.flightPendingSince = nil
   ensureSession()
   _G.rfsuite.session.isConnected = false
   _G.rfsuite.session.rfConnected = false
@@ -334,6 +415,9 @@ function Events.wakeup(carry)
       restorePendingModelName()
     end
   end
+  if state.flightPendingSince ~= nil and state.linkStableUp then
+    settleFlightAfterGap(t)
+  end
   -- Trigger per-category runners
   do
     -- onconnect: call runner while linkStableUp is true (runner progresses internally)
@@ -343,8 +427,13 @@ function Events.wakeup(carry)
 
     local armed = mspState and mspState.lastArmed == true
 
+    -- A board whose MSP API version was refused gets no connect chain: the MSP runtime sends
+    -- nothing to it, so every task would only wait out its timeout and retries in turn. The
+    -- refusal is reported by the tool's notice and the dashboard's status line instead.
+    local refused = mspState.unsupportedApi == true
+
     local onconnectActive = false
-    if state.linkStableUp and not armed then
+    if state.linkStableUp and not armed and not refused then
       local onconnect = ensureEventRunner("onconnect")
       if onconnect then
         local wasActive = false
@@ -400,8 +489,11 @@ function Events.wakeup(carry)
       end
     end
 
-    -- arm/ disarm transitions: detect changes and call corresponding runners (linkStableUp only)
-    if state.linkStableUp then
+    -- arm/ disarm transitions: detect changes and call corresponding runners (linkStableUp only).
+    -- Not while a flight kept across a link loss is still being settled: `armed` may be the
+    -- reading from before the loss, and an edge taken off it would open or close a flight that
+    -- nothing has seen.
+    if state.linkStableUp and state.flightPendingSince == nil then
       if state.lastArmed == nil then
         state.lastArmed = armed
       end
@@ -438,12 +530,18 @@ function Events.wakeup(carry)
     --
     -- Widget context only. The record belongs to the widget that runs this work; the tool has a
     -- clock of its own and is not a second writer.
+    --
+    -- `connected` is this pass's raw link state, not the held one: the MSP runtime ticked just
+    -- before this wakeup, and EdgeTX answers getRSSI() with 0 on the same condition on which it
+    -- answers every telemetry source with 0. The record samples nothing while it is false. (The two
+    -- are read a moment apart in the pass, so a gap that starts between them can still let one
+    -- sample through.)
     if context == "widget" then
       if FlightRecord == nil then
         FlightRecord = loadModule("tasks/events/telemetry/flight_record.lua") or false
       end
       if FlightRecord then
-        local ok, err = pcall(FlightRecord.wakeup, armed)
+        local ok, err = pcall(FlightRecord.wakeup, armed, connected)
         if not ok and Log and type(Log.emit) == "function" then
           pcall(Log.emit, "rfsuite.events", "flight_record.wakeup error: " .. tostring(err), "error")
         end

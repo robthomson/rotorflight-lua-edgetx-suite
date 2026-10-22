@@ -14,7 +14,7 @@ part of the backlog is dropped.
 The suite can move that work into a small script the radio runs outside the widgets:
 `SCRIPTS/FUNCTIONS/rfsbg.lua`. A call there is paused and continued on the next turn instead of
 being cut off, so it decodes every frame it takes. The same script also makes the adjustment
-announcements.
+announcements, at the level set under *Settings* → *Audio* → *Volume*.
 
 ## Where to find it
 
@@ -56,9 +56,14 @@ and nothing needs to be configured.
   than its share of a cycle is not called again by the radio, so it cannot write down that this
   happened to it; this script runs outside the widgets and can. With the debug level at *DEBUG* or
   above its log then carries a line naming how long the dashboard has been silent and what its
-  last cycle cost. A model without this script has nothing that can report that.
-- **It writes a log of its own** when *Log Session To Card* is on, under the `function_` prefix,
-  beside the tool's and the widgets'. Because this script is paused and resumed rather than cut
-  off, it keeps writing where a widget that overran its instruction budget cannot, and its
+  last drawn cycle cost. A dashboard on another screen page or behind one of the radio's menu pages
+  is still called by the radio and still does its work, so it is not reported. A model without this script has nothing
+  that can report that.
+- **It writes a log of its own** when *Log Session To Card* is on and the debug level is *DEBUG*
+  or above, under the `function_` prefix, beside the tool's and the widgets'. Unlike theirs, it
+  needs both switches to start: *Log Session To Card* alone writes no `function_` file. Once it
+  has started, lowering the level again does not stop it for the rest of that session, although
+  its step file is then no longer rewritten. Because this script is paused and resumed rather
+  than cut off, it keeps writing where a widget that overran its instruction budget cannot, and its
   one-line step file says when it last ran. See
   [collecting logs](../troubleshooting/collecting-logs.md).

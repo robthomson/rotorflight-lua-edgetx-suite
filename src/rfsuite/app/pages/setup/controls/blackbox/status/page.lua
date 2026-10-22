@@ -44,6 +44,7 @@ local ui = {
     totalSizeKB = 0
   },
   eraseInProgress = false,
+  eraseStarted = false,
   loading = false,
   saving = false,
   progress = 0,
@@ -206,7 +207,9 @@ local function pollSummaries(isAuto)
 
           if ui.runtime then ui.runtime.readPending = false end
           ui.loading = false
-          ui.progress = 100
+          -- During an erase this is one of the polls that wait for the flash; the bar belongs
+          -- to the erase then and stays where the erase put it.
+          if not ui.eraseInProgress then ui.progress = 100 end
           if type(ui.runtime.requestRebuild) == "function" then
             ui.runtime.requestRebuild()
           end
@@ -245,6 +248,7 @@ local function queueEraseDataflash()
   end
 
   ui.eraseInProgress = true
+  ui.eraseStarted = false
   ui.loading = false
   ui.saving = true -- This displays the Saving/Erasing overlay
   ui.progress = 0
@@ -257,10 +261,19 @@ local function queueEraseDataflash()
     command = eraseApi.writeCommand,
     payload = eraseApi.buildWritePayload({}),
     isWrite = true,
+    -- The quick menu's erase of the same command waits as long (widgets/dashboard/fullscreen_menu.lua);
+    -- a resend after the default 2 s would ask the flight controller to erase a second time.
+    timeout = 10.0,
     simulatorResponse = {},
     processReply = function()
       if not ui.loaded or not ui.runtime then return end
       -- Erase started successfully. We will monitor ui.dataflash.ready in wakeup.
+      -- The ready flag held until now is from a summary sent before the erase: the flash was idle,
+      -- which is why it could be erased. The queue sends one request at a time in order, so every
+      -- summary answered from here on was asked after the erase command, and only such an answer
+      -- may end the erase.
+      ui.dataflash.ready = false
+      ui.eraseStarted = true
       ui.progress = 50
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
@@ -269,6 +282,7 @@ local function queueEraseDataflash()
     errorHandler = function()
       if not ui.loaded or not ui.runtime then return end
       ui.eraseInProgress = false
+      ui.eraseStarted = false
       ui.saving = false
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
@@ -308,6 +322,7 @@ local function ensureLoaded()
     totalSizeKB = 0
   }
   ui.eraseInProgress = false
+  ui.eraseStarted = false
   ui.loaded = true
   ui.dirty = false
   ui.runtime.lastSessionSignature = buildSessionSignature()
@@ -346,8 +361,9 @@ function M.wakeup(ctx)
         pollSummaries(true)
       end
     end
-    if ui.dataflash.ready then
+    if ui.eraseStarted and ui.dataflash.ready then
       ui.eraseInProgress = false
+      ui.eraseStarted = false
       ui.saving = false
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
@@ -357,12 +373,17 @@ function M.wakeup(ctx)
 end
 
 function M.getHeaderActions()
+  -- `*` erases the onboard dataflash (M.onStar asks first). It is offered only once the board has
+  -- reported a dataflash, and not while an erase is running: a board without one has nothing to
+  -- erase, and its summary never reports a flash that is ready, so an erase command the board
+  -- accepts would leave the page waiting indefinitely. Reload is held while erasing too: it
+  -- reloads the page state, which would drop the wait for an erase still running.
   return {
     save = false,
-    reload = true,
+    reload = not ui.eraseInProgress,
     help = true,
     menu = true,
-    tool = true
+    star = ui.dataflash.supported == true and not ui.eraseInProgress
   }
 end
 
@@ -469,8 +490,12 @@ end
 
 function M.onStar(ctx)
   if not ConfirmDialog then return false end
+  -- The host resolves the header before the page's build resets its state, so on a revisit `*`
+  -- can be drawn from the previous visit until this visit's first read answers; a press then is
+  -- answered with a redraw, which greys the button.
+  if ui.dataflash.supported ~= true or ui.eraseInProgress then return true end
   local i18n = ctx and ctx.i18n
-  local title = pageText(i18n, "title", "Blackbox")
+  local title = pageText(i18n, "title_status", "Blackbox Status")
   local message = pageText(i18n, "erase_prompt", "Erase onboard dataflash logs?")
 
   ConfirmDialog.show({

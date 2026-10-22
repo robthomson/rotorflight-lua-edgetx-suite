@@ -92,6 +92,7 @@ end
 
 local function queueAccRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not MspRuntime or not AccTrimApi or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -103,6 +104,7 @@ local function queueAccRead(isAutoReload)
   end
 
   local runtime = ui.runtime
+  local readValid = true
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -118,6 +120,7 @@ local function queueAccRead(isAutoReload)
     processReply = function(self, buf)
       if ui.runtime ~= runtime then return end
       local parsed = AccTrimApi.parse(buf)
+      if type(parsed) ~= "table" then return Common.failPageRead(ui) end
       if parsed then
         ui.config.roll = parsed.roll
         ui.config.pitch = parsed.pitch
@@ -137,12 +140,14 @@ local function queueAccRead(isAutoReload)
       ui.loading = false
       ui.dirty = false
       ui.progress = 100
+      ui.runtime.readComplete = readValid
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
       end
     end,
     errorHandler = function()
       if ui.runtime ~= runtime then return end
+      readValid = false
       ui.runtime.readPending = false
       ui.loading = false
       if type(ui.runtime.requestRebuild) == "function" then
@@ -349,8 +354,13 @@ function M.build(ctx)
   )
 end
 
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
   if ui.calibrating then return false end
+  if not M.canSave() then return false, "loaded_data_missing" end
   local ok, err = queueAccWrite()
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -497,6 +507,11 @@ function M.onClose()
   LoadingOverlay = nil
   ConfirmDialog = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

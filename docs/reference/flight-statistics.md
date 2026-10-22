@@ -161,6 +161,15 @@ every wakeup, so a flight's duration does not depend on how often the statistics
 a single step of that clock is capped at one second — a widget can be suspended for a whole tool
 session, and the wakeup after that must not credit the flight with all of it.
 
+**Nothing is sampled while the telemetry link is down.** Once the link has not streamed for a
+second, EdgeTX answers every telemetry value with 0, and a 0 there is not a reading: the lowest
+ESC temperature, which has no gate of its own, would take it as the flight's minimum. The record
+skips its samples for as long as the link is not streaming and takes the next one as soon as it
+is back; the flight clock keeps running through the gap, since the flight does. A gap long enough
+for the link to count as lost — down for 2 s, about 3 s after the last frame — is a different case,
+described below: while the craft is armed the flight is kept, and it goes on if the craft is still
+armed when the link comes back.
+
 ## The readings a sampling pass offers, once
 
 The record runs from the event runtimes, and a widget drives those at the top of its own pass —
@@ -223,6 +232,16 @@ pack, and the post-flight page has to outlive that: its tiles read this record, 
 the flight time and the flight count stay as they were for as long as the link is down. The record
 is dropped when the next session begins — when a link comes up again, which is, as far as anything
 here can tell, a fresh pack — and the next arm edge opens a fresh `current` as it always has.
+
+**A link lost while the craft is armed is not a new session when it comes back with the craft
+still armed.** A pack is not swapped under a flying model, so the record, its clock and the flight
+count are kept through the gap and the flight goes on: one flight, with its statistics from both
+sides of the gap, and the flight log's line for it at the disarm. Whether the craft is still armed
+is taken from an arm reading the radio has received since the link came back — the reading from
+before the gap is what the radio keeps answering until the next one arrives, so it cannot say. A
+craft that turns out to have disarmed in the gap ends the flight with no line in the flight log,
+as there is no honest end to it, and a session begins as above. So does a link after which no arm
+reading arrives within 5 s; the arm edge then opens a fresh record if the craft is armed.
 
 The readings the statistics are taken from are dropped at the same moment. Within a session a
 sensor that answers nothing in a pass leaves its previous reading standing; across a new connection

@@ -54,7 +54,6 @@ local FF_HOT = 1.15
 local FF_LOW = 0.85
 local FF_STEP_MAX = 0.2         -- change F by at most 20% per step
 local GAIN_MAX = 1000           -- firmware PID_GAIN_MAX, the limit for P and F alike
-local RATE_RAW_MAX = 255
 
 -- rates_type values, as the Rates page numbers its tables
 local RATE_TYPE_ACTUAL = 4
@@ -70,12 +69,12 @@ local LINEAR_ROLES = {
 }
 
 -- How the Rates page shows a raw roll, pitch or yaw byte for these three types: raw * mult /
--- scale, in the decimals its formatValue gives that scale (RATE_TABLES in
--- app/pages/flight_tuning/rates/page.lua).
+-- scale, in the decimals its formatValue gives that scale, and the raw range its cell takes
+-- (RATE_TABLES in app/pages/flight_tuning/rates/page.lua). A suggestion stays inside that range.
 local RATE_DISPLAY = {
-  [RATE_TYPE_ACTUAL] = { rcRate = { mult = 10, scale = 1 }, srate = { mult = 10, scale = 1 } },
-  [RATE_TYPE_QUICK] = { rcRate = { mult = 1, scale = 100 }, srate = { mult = 10, scale = 1 } },
-  [RATE_TYPE_ROTORFLIGHT] = { rcRate = { mult = 5, scale = 1 } },
+  [RATE_TYPE_ACTUAL] = { rcRate = { mult = 10, scale = 1, min = 1, max = 100 }, srate = { mult = 10, scale = 1, min = 0, max = 100 } },
+  [RATE_TYPE_QUICK] = { rcRate = { mult = 1, scale = 100, min = 1, max = 255 }, srate = { mult = 10, scale = 1, min = 0, max = 100 } },
+  [RATE_TYPE_ROTORFLIGHT] = { rcRate = { mult = 5, scale = 1, min = 2, max = 200 } },
 }
 
 -- Max rate asked at full stick (deg/s) from the raw bytes, where the type makes it direct: the
@@ -296,7 +295,8 @@ local function rateActions(T, a, axis, k, act)
   end
   for _, role in ipairs(roles) do
     local raw = (role == "rcRate") and a.rcRate or a.sRate
-    local newRaw = clamp(round(raw * k), 1, RATE_RAW_MAX)
+    local range = RATE_DISPLAY[a.ratesType][role]
+    local newRaw = clamp(round(raw * k), range.min, range.max)
     act(string.format(PATH_FMT, T.ratesPage, T.ratesAxis[axis], T.rateColumns[a.ratesType][role],
       rateText(raw, a.ratesType, role), rateText(newRaw, a.ratesType, role)))
   end

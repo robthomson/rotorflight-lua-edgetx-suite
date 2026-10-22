@@ -43,6 +43,8 @@ local ui = {
   modes = {},
   selectedModeIndex = 1,
   autoDetectSlots = {},
+  -- slot -> true for every range edited since the last read or save; Save writes only these
+  dirtySlots = {},
   runtime = {
     readPending = false,
     requestRebuild = nil,
@@ -126,9 +128,11 @@ local function auxIndexToMember(auxIndex)
     if idx == 2 and map.aux3 ~= nil then return map.aux3 end
   end
 
-  local base = 5
-  if map and map.aux1 ~= nil then base = map.aux1 end
-  return base + idx
+  -- The flight controller reads AUX index idx from its channel 5 + idx (fc/rc_modes.h,
+  -- fc/rc_adjustments.c), and its channel map reorders only its first eight channels (rx/rx.c
+  -- readRxChannels, RX_MAPPABLE_CHANNEL_COUNT), the last three of which are AUX 1 to AUX 3.
+  -- AUX 4 and above therefore always sit on radio channels 9 and up, wherever the map puts AUX 1.
+  return 5 + idx
 end
 
 local function getAuxPulseUs(auxIndex)
@@ -217,6 +221,7 @@ local function removeRangeSlot(slot)
   }
   ui.autoDetectSlots[slot] = nil
 
+  ui.dirtySlots[slot] = true
   ui.dirty = true
   buildModesFromRaw()
   if type(ui.runtime.requestRebuild) == "function" then
@@ -266,6 +271,7 @@ local function onPressSetRange(slot, rawRange, i18n)
       onConfirm = function()
         rawRange.range.start = targetStart
         rawRange.range["end"] = targetEnd
+        ui.dirtySlots[slot] = true
         ui.dirty = true
         if type(ui.runtime.requestRebuild) == "function" then
           ui.runtime.requestRebuild()
@@ -310,6 +316,7 @@ local function addRangeToSelectedMode(i18n)
     linkedTo = 0
   }
 
+  ui.dirtySlots[freeSlot] = true
   ui.dirty = true
   buildModesFromRaw()
   if type(ui.runtime.requestRebuild) == "function" then
@@ -416,6 +423,7 @@ local function appendRangeRow(children, x, y, w, rangeIndex, modeRange, i18n)
         ui.autoDetectSlots[slot] = nil
         rawRange.auxChannelIndex = clamp(val - 2, 0, AUX_CHANNEL_COUNT - 1)
       end
+      ui.dirtySlots[slot] = true
       ui.dirty = true
     end
   }
@@ -434,6 +442,7 @@ local function appendRangeRow(children, x, y, w, rangeIndex, modeRange, i18n)
     set = function(value)
       local val = tonumber(value) or 1
       rawExtra.modeLogic = clamp(val - 1, 0, 1)
+      ui.dirtySlots[slot] = true
       ui.dirty = true
     end
   }
@@ -455,6 +464,7 @@ local function appendRangeRow(children, x, y, w, rangeIndex, modeRange, i18n)
       if rawRange.range["end"] < rawRange.range.start then
         rawRange.range["end"] = rawRange.range.start
       end
+      ui.dirtySlots[slot] = true
       ui.dirty = true
     end,
     display = function(val)
@@ -480,6 +490,7 @@ local function appendRangeRow(children, x, y, w, rangeIndex, modeRange, i18n)
       if rawRange.range.start > rawRange.range["end"] then
         rawRange.range.start = rawRange.range["end"]
       end
+      ui.dirtySlots[slot] = true
       ui.dirty = true
     end,
     display = function(val)
@@ -647,6 +658,7 @@ local function startLoad(requestRebuild)
                       ui.runtime.readPending = false
                       ui.loading = false
                       ui.dirty = false
+                      ui.dirtySlots = {}
                       ui.progress = 100
                       ui.runtime.readComplete = readValid
                       triggerRebuild()
@@ -680,14 +692,28 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
     return false, "msp_queue_unavailable"
   end
 
+  -- Only the ranges edited since the last read or save are written: each MSP_SET_MODE_RANGE makes
+  -- the flight controller re-initialise its mode conditions, and a range written back unedited is
+  -- still clamped on the way out. With nothing edited, nothing is sent and EEPROM is not written.
+  local changedSlots = {}
+  for i = 1, #ui.modeRanges do
+    if ui.dirtySlots[i] then
+      changedSlots[#changedSlots + 1] = i
+    end
+  end
+
+  if #changedSlots == 0 then
+    return true
+  end
+
   ui.saving = true
   ui.progress = 0
   if type(requestRebuild) == "function" then
     requestRebuild()
   end
 
-  local slot = 1
-  local total = #ui.modeRanges
+  local slotPos = 1
+  local total = #changedSlots
 
   local function failed(reason)
     ui.saving = false
@@ -705,7 +731,7 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
   end
 
   local function writeNext()
-    if slot > total then
+    if slotPos > total then
       local eepromApi = loadModule("tasks/msp/api/eeprom_write.lua")
       if eepromApi then
         queue:add({
@@ -716,6 +742,7 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
           processReply = function()
             ui.saving = false
             ui.dirty = false
+            ui.dirtySlots = {}
             ui.progress = 100
             saveToSession()
             if type(requestRebuild) == "function" then
@@ -734,6 +761,7 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
       else
         ui.saving = false
         ui.dirty = false
+        ui.dirtySlots = {}
         ui.progress = 100
         saveToSession()
         if type(requestRebuild) == "function" then
@@ -750,6 +778,7 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
       return
     end
 
+    local slot = changedSlots[slotPos]
     local range = ui.modeRanges[slot] or {id = 0, auxChannelIndex = 0, range = {start = 900, ["end"] = 900}}
     local extra = ui.modeRangesExtra[slot] or {id = 0, modeLogic = 0, linkedTo = 0}
 
@@ -765,7 +794,7 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
       clamp(extra.linkedTo or 0, 0, 255)
     }
 
-    ui.progress = math.floor((slot - 1) * 90 / total)
+    ui.progress = math.floor((slotPos - 1) * 90 / total)
     if type(requestRebuild) == "function" then
       requestRebuild()
     end
@@ -776,7 +805,7 @@ local function queueModesWrite(requestRebuild, i18n, ctx)
       isWrite = true,
       simulatorResponse = {},
       processReply = function()
-        slot = slot + 1
+        slotPos = slotPos + 1
         writeNext()
       end,
       errorHandler = function()
@@ -830,6 +859,7 @@ local function checkLiveUpdates()
               if delta >= 120 then
                 rawRange.auxChannelIndex = auxIdx
                 ui.autoDetectSlots[slot] = nil
+                ui.dirtySlots[slot] = true
                 ui.dirty = true
                 needsRebuild = true
                 break
@@ -883,6 +913,8 @@ local function ensureLoaded()
   loadFromSession()
   ui.loaded = true
   ui.dirty = false
+  ui.dirtySlots = {}
+  ui.autoDetectSlots = {}
   ui.runtime.lastSessionSignature = buildSessionSignature()
   ui.baseTitle = getBaseTitle()
   startLoad(ui.runtime.requestRebuild)
@@ -946,9 +978,12 @@ function M.build(ctx)
     return
   end
 
-  if ui.loading then
-    local titleText = "@i18n(app.loading)@"
-    local msgText = pageText(i18n, "loading", "Loading mode data...")
+  -- The save covers the page as the load does: the chain reads each range only when it reaches
+  -- it, so an edit made while it runs could be dropped and still reported as saved.
+  if ui.loading or ui.saving then
+    local titleText = ui.loading and "@i18n(app.loading)@" or "@i18n(app.saving)@"
+    local msgText = ui.loading and pageText(i18n, "loading", "Loading mode data...")
+      or pageText(i18n, "saving_config", "Saving mode configuration")
     LoadingOverlay.append(children, {
       x = x, y = y, w = w, h = h,
       title = titleText,
@@ -1063,6 +1098,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second chain beside the running one
+  -- would write the same ranges twice, and the first one's reply would clear the marks under it.
+  if ui.saving then return false end
   local ok, err = queueModesWrite(ctx and ctx.requestRebuild, ctx and ctx.i18n, ctx)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -1078,8 +1116,12 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- A read started under a running save would replace the ranges the chain has still to send.
+  if ui.saving then return true end
   local session = getSession()
   if session then
+    ui.dirtySlots = {}
+    ui.autoDetectSlots = {}
     loadFromSession()
     ui.dirty = false
     startLoad(ctx and ctx.requestRebuild)
@@ -1114,6 +1156,11 @@ function M.onClose()
   LoadingOverlay = nil
   ConfirmDialog = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

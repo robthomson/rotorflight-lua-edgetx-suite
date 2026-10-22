@@ -130,8 +130,10 @@ local function saveToStore()
   if type(s.modelPreferences.inflight) ~= "table" then s.modelPreferences.inflight = {} end
   Setup.storeModelSettings(s.modelPreferences.inflight, ui.config)
 
-  local MP = loadModule("lib/model_preferences.lua")
-  if type(MP) ~= "table" or type(MP.saveByMcuId) ~= "function" then return false, "model_preferences" end
+  -- loadModule asserts, and a raise here would put the loader's own error text on screen. A module
+  -- that will not load answers as saveByMcuId does when it has no store: "unavailable".
+  local loaded, MP = pcall(loadModule, "lib/model_preferences.lua")
+  if not loaded or type(MP) ~= "table" or type(MP.saveByMcuId) ~= "function" then return false, "unavailable" end
   return MP.saveByMcuId(s.mcu_id, s.modelPreferences)
 end
 
@@ -163,7 +165,7 @@ function M.onSave(ctx)
       ctx.reportSave({
         ok = false,
         title = t(ctx.i18n, "save_error_title", "Error"),
-        message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. tostring(err or "io")
+        message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. Common.saveFailureReason(ctx.i18n, err, true)
       })
     end
     -- Nothing was stored and nothing on the page changed, so there is nothing to draw again. The
@@ -421,6 +423,11 @@ function M.onClose()
   Setup = nil
   FcAction = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

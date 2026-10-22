@@ -72,6 +72,10 @@ function M.append(children, opts)
   local progress = progressFn and clamp01(progressFn()) or clamp01(opts.progress)
 
   local action = type(opts.action) == "table" and opts.action or nil
+  -- A question with more than one answer passes them all as `actions`, in the order they are
+  -- drawn and focused. `action` stays the one-button form every other caller uses.
+  local actions = type(opts.actions) == "table" and #opts.actions > 0 and opts.actions or nil
+  local actionCount = actions and #actions or (action and 1 or 0)
 
   -- A box that reports no progress. A notice waiting to be acknowledged has none to
   -- report, and a bar sitting at zero or at full under it says something untrue; without
@@ -80,6 +84,24 @@ function M.append(children, opts)
 
   local boxW = math.min(420, math.max(220, w - 40))
   local innerW = boxW - 28
+
+  -- Several buttons share one row while every label fits its share of it, and stand one under
+  -- the other where one does not: a narrow screen with a long translated label. One button is
+  -- the width it always had.
+  local btnW = math.min(180, boxW - 32)
+  local buttonRows = 1
+  if actions and actionCount > 1 then
+    btnW = math.floor((boxW - 32 - (actionCount - 1) * 8) / actionCount)
+    for i = 1, actionCount do
+      local labelW = textSize(actions[i].text, 0, 9, 20)
+      if labelW + 16 > btnW then
+        buttonRows = actionCount
+      end
+    end
+    if buttonRows > 1 then
+      btnW = math.min(180, boxW - 32)
+    end
+  end
 
   -- The title is drawn in MIDSIZE into `innerW` and wraps when it does not fit, while
   -- everything under it sat at a fixed offset from the top of the box -- so a title of two
@@ -156,7 +178,7 @@ function M.append(children, opts)
   local messageTop = 10 + titleStep + extra
   local messageRoom = (110 + extra + titleShift) - messageTop
   local barBlock = showBar and 0 or -32
-  local baseBoxH = (action and 208 or 154) + extra + barBlock + titleShift
+  local baseBoxH = (actionCount > 0 and 208 or 154) + (buttonRows - 1) * 40 + extra + barBlock + titleShift
 
   -- A message has no length of its own to rely on: a runtime error string is whatever was
   -- raised. The box grows by every line that does not fit in `messageRoom`, so past a certain
@@ -277,17 +299,23 @@ function M.append(children, opts)
   -- nothing to decide while something is being read; a caller that CAN be left early -- a save
   -- whose settings are already stored, waiting on a flight controller that may never come back
   -- -- passes one, and it is drawn here so the box geometry stays in one place.
-  if action then
-    local btnW = math.min(180, boxW - 32)
-    children[#children + 1] = {
-      type = "button",
-      x = boxX + math.floor((boxW - btnW) / 2),
-      y = showBar and (barY + barH + 14) or barY,
-      w = btnW,
-      h = 32,
-      text = tostring(action.text or "OK"),
-      press = type(action.press) == "function" and action.press or function() end
-    }
+  if actionCount > 0 then
+    local btnY = showBar and (barY + barH + 14) or barY
+    local perRow = buttonRows > 1 and 1 or actionCount
+    local rowX = boxX + math.floor((boxW - (perRow * btnW + (perRow - 1) * 8)) / 2)
+    for i = 1, actionCount do
+      local a = actions and actions[i] or action
+      local slot = buttonRows > 1 and 0 or (i - 1)
+      children[#children + 1] = {
+        type = "button",
+        x = rowX + slot * (btnW + 8),
+        y = btnY + (buttonRows > 1 and (i - 1) * 40 or 0),
+        w = btnW,
+        h = 32,
+        text = tostring(a.text or "OK"),
+        press = type(a.press) == "function" and a.press or function() end
+      }
+    end
   end
 end
 

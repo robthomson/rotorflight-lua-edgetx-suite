@@ -10,7 +10,7 @@
 
 local M = {}
 
--- Their packager rewrites every literal t("widgets.dashboard.<key>", "FALLBACK") call site into
+-- Their packager rewrites every t(<key>, <fallback>) call site with a literal widgets.dashboard key into
 -- the locale being built (bin/package/build_package.py, .vscode/scripts/precompile_i18n.py). In a
 -- tree that has not been packaged the call survives and answers with its own English fallback,
 -- which is what the simulator and the offline accounting run see.
@@ -152,7 +152,7 @@ M.FUNCTIONS = {
     cmd = 112, api = "pid_tuning", field = "pid_0_O" },
   { id = 61, name = t("widgets.dashboard.fn_cross_coupling_gain", "Cross Coupling Gain"), min = 0, max = 250,
     cmd = 94, api = "pid_profile", field = "cyclic_cross_coupling_gain" },
-  { id = 62, name = t("widgets.dashboard.fn_cross_coupling_ratio", "Cross Coupling Ratio"), min = 0, max = 250,
+  { id = 62, name = t("widgets.dashboard.fn_cross_coupling_ratio", "Cross Coupling Ratio"), min = 0, max = 200,
     cmd = 94, api = "pid_profile", field = "cyclic_cross_coupling_ratio" },
   { id = 63, name = t("widgets.dashboard.fn_cross_coupling_cutoff", "Cross Coupling Cutoff"), min = 0, max = 250,
     cmd = 94, api = "pid_profile", field = "cyclic_cross_coupling_cutoff" },
@@ -789,17 +789,6 @@ function M.compareStep(work, budget)
   }
 end
 
---- The same comparison, run whole. For a caller that is not on a widget pass.
-function M.compare(records, map, bankChannel, valueChannel, steps)
-  local work = M.newComparison(records, map, bankChannel, valueChannel, steps)
-  if work == nil then return nil end
-  local done, result
-  repeat
-    done, result = M.compareStep(work)
-  until done
-  return result
-end
-
 --- The same verdict from the FUNCTION IDS alone, which is one reply rather than one per slot.
 --
 -- MSP_GET_ADJUSTMENT_FUNCTION_IDS answers every slot's function in a single forty-two byte reply,
@@ -843,7 +832,7 @@ function M.compareFunctionIds(ids, map, bankChannel, valueChannel)
     differ = differ,
     count = empty + differ,
     slots = list,
-    -- The flag that keeps this verdict from being read as the one M.compare makes. A board whose
+    -- The flag that keeps this verdict from being read as the one M.compareStep makes. A board whose
     -- every slot names the right function can still have every window wrong, and this comparison
     -- would call it a match.
     idsOnly = true

@@ -40,7 +40,14 @@ local CONFIG_SCHEMA = {
   -- Seconds the pack voltage has to stay below the warning line before the alert speaks. 0 is
   -- the behaviour this setting was added to, where the first sample under the line announces.
   { key = "voltage_hold",      type = "number", default = 2, min = 0, max = 10, section = "voltage" },
+  -- Millivolts per cell above the warning line that the pack has to come back to before the
+  -- alert counts as cleared, so the number means the same on every pack, as the line does.
+  { key = "voltage_reset",     type = "number", default = 100, min = 50, max = 500, section = "voltage" },
   { key = "main_power_lost",   type = "bool", default = false, section = "voltage" },
+  -- How every flight-pack voltage is spoken: 0 the pack's voltage, 1 the voltage per cell.
+  -- It covers the low-voltage alert, the main pack coming back and the pack check on connect;
+  -- not the BEC voltage spoken with Main Power Lost, which is not the flight pack's.
+  { key = "voltage_announce",  type = "number", default = 0, min = 0, max = 1, section = "voltage" },
   -- Whether an alert repeats and whether it buzzes belong to a CATEGORY rather than to one
   -- alert: this page is where the pilot switches its alerts on, so it is where they say how
   -- those alerts behave. A repeat of 0 is "for as long as the condition holds", which is what
@@ -57,17 +64,70 @@ local CONFIG_SCHEMA = {
   -- written through the per-model store whenever there is one, and falls back to the
   -- global file on a radio that has none.
   { key = "esc_threshold",     type = "number", default = 90, min = 60, max = 300, scope = "model", section = "esc" },
+  -- The level above the warning one, where the alert vibrates as well. The same aircraft's
+  -- hardware as the warning level, so the same scope and range.
+  { key = "esc_critical",      type = "number", default = 110, min = 60, max = 300, scope = "model", section = "esc" },
   { key = "mcu_temperature",   type = "bool", default = false, section = "esc" },
-  -- No `scope = "model"`, unlike the ESC threshold above: the flight controller's MCU is the
-  -- same silicon with the same rating in every aircraft, so a copy of this limit per model
+  -- No `scope = "model"`, unlike the ESC levels above: the flight controller's MCU is the
+  -- same silicon with the same rating in every aircraft, so a copy of these levels per model
   -- would be one more place to keep in step and nothing else.
   { key = "mcu_threshold",     type = "number", default = 80, min = 40, max = 150, section = "esc" },
+  -- The current as a percentage of the speed controller's limit (Setup > Power > Preferences).
+  -- Radio-wide: the load is already a share of the model's own limit, so the same percentages
+  -- mean the same in every model. Above 100 is a load past the limit, which is why the range is.
+  { key = "esc_load",          type = "bool", default = false, section = "esc" },
+  { key = "esc_load_warn",     type = "number", default = 80, min = 10, max = 200, section = "esc" },
+  { key = "esc_load_critical", type = "number", default = 100, min = 10, max = 200, section = "esc" },
+  -- Seconds the load has to stay at or above a level before it is spoken.
+  { key = "esc_load_hold",     type = "number", default = 5, min = 0, max = 30, section = "esc" },
+  { key = "mcu_critical",      type = "number", default = 95, min = 40, max = 150, section = "esc" },
   { key = "esc_repeat",        type = "number", default = 0, min = 0, max = 10, section = "esc" },
   { key = "esc_haptic",        type = "bool", default = true,  section = "esc" },
   { key = "lq_alert",          type = "bool", default = false, section = "link" },
   { key = "lq_warn",           type = "number", default = 70, min = 1, max = 100, section = "link" },
   { key = "lq_critical",       type = "number", default = 50, min = 1, max = 100, section = "link" },
   { key = "telemetry_lost",    type = "bool", default = false, section = "link" },
+  -- The TX power alert: the transmitter's power as a share of its maximum, which rises as the link
+  -- weakens, so its levels are lines the share climbs to and the critical one is the higher. The
+  -- maximum is the module's own Max Power, read from the module; `tpwr_limit` puts `tpwr_max` in its
+  -- place. All of it is the transmitter's rather than the aircraft's, so none of it is per model.
+  { key = "tpwr_alert",        type = "bool", default = false, section = "link" },
+  { key = "tpwr_warn",         type = "number", default = 60, min = 1, max = 100, section = "link" },
+  { key = "tpwr_critical",     type = "number", default = 85, min = 1, max = 100, section = "link" },
+  { key = "tpwr_hold",         type = "number", default = 2, min = 0, max = 10, section = "link" },
+  { key = "tpwr_limit",        type = "bool", default = false, section = "link" },
+  -- No range: a choice out of TX_POWER_MAX_VALUES below, the power steps a module offers.
+  { key = "tpwr_max",          type = "number", default = 100, section = "link" },
+  -- The signal headroom over the air rate's sensitivity floor, in percent of the scale
+  -- lib/link_rates.lua defines (LinkRates.headroom): RSSI at the receiver, Downlink at the
+  -- transmitter module. Each has its own switch, its own pair of levels and its own hold, the
+  -- seconds a level has to hold before it is spoken.
+  { key = "rssi_alert",        type = "bool", default = false, section = "link" },
+  { key = "rssi_warn",         type = "number", default = 15, min = 1, max = 100, section = "link" },
+  { key = "rssi_critical",     type = "number", default = 8, min = 1, max = 100, section = "link" },
+  { key = "rssi_hold",         type = "number", default = 2, min = 0, max = 10, section = "link" },
+  { key = "trss_alert",        type = "bool", default = false, section = "link" },
+  { key = "trss_warn",         type = "number", default = 15, min = 1, max = 100, section = "link" },
+  { key = "trss_critical",     type = "number", default = 8, min = 1, max = 100, section = "link" },
+  { key = "trss_hold",         type = "number", default = 2, min = 0, max = 10, section = "link" },
+  -- The signal-to-noise ratio at the receiver (SNR) and at the transmitter module (Downlink SNR),
+  -- in percent of the window between the air rate's two dynamic-power thresholds
+  -- (LinkRates.snrPercent): 0 is the threshold at which ExpressLRS asks for more power, so the
+  -- critical level may be 0.
+  { key = "rsnr_alert",        type = "bool", default = false, section = "link" },
+  { key = "rsnr_warn",         type = "number", default = 30, min = 0, max = 100, section = "link" },
+  { key = "rsnr_critical",     type = "number", default = 0, min = 0, max = 100, section = "link" },
+  { key = "rsnr_hold",         type = "number", default = 2, min = 0, max = 10, section = "link" },
+  { key = "tsnr_alert",        type = "bool", default = false, section = "link" },
+  { key = "tsnr_warn",         type = "number", default = 30, min = 0, max = 100, section = "link" },
+  { key = "tsnr_critical",     type = "number", default = 0, min = 0, max = 100, section = "link" },
+  { key = "tsnr_hold",         type = "number", default = 2, min = 0, max = 10, section = "link" },
+  -- Telemetry dropouts: spoken when the flight controller's frames are missed `dropouts_count`
+  -- times within `dropouts_window` seconds. The window starts at 4 s because the skipped-frame
+  -- counter it watches is published every 2 s.
+  { key = "dropouts_alert",    type = "bool", default = false, section = "link" },
+  { key = "dropouts_count",    type = "number", default = 3, min = 1, max = 50, section = "link" },
+  { key = "dropouts_window",   type = "number", default = 10, min = 4, max = 60, section = "link" },
   { key = "link_repeat",       type = "number", default = 0, min = 0, max = 10, section = "link" },
   { key = "link_haptic",       type = "bool", default = true,  section = "link" },
   { key = "adjustment_events", type = "bool", default = false, section = "adjustment" },
@@ -91,6 +151,10 @@ local CONFIG_SCHEMA = {
   { key = "pack_not_full_margin", type = "number", default = 100, min = 10, max = 500, section = "connect" },
   { key = "battery_profile",   type = "bool", default = true,  section = "connect" },
   { key = "initial_fuel",      type = "bool", default = true,  section = "connect" },
+  -- The start of a rescue and its end, each spoken under a switch of its own. Both default to off,
+  -- so a radio that never opens this page announces nothing new.
+  { key = "rescue_active",     type = "bool", default = false, section = "rescue" },
+  { key = "rescue_off",        type = "bool", default = false, section = "rescue" },
 }
 
 -- One enable per governor state, under the `governor_state` master switch. They default to on,
@@ -106,6 +170,20 @@ end
 local SCHEMA_BY_KEY = {}
 for i = 1, #CONFIG_SCHEMA do
   SCHEMA_BY_KEY[CONFIG_SCHEMA[i].key] = CONFIG_SCHEMA[i]
+end
+
+-- The schema split by the page that owns each entry, built once when this file is loaded. A
+-- page loads its settings while it is first built, and walking only its own entries keeps that
+-- build from paying for every setting another page adds to the schema.
+local SECTION_FIELDS = {}
+for i = 1, #CONFIG_SCHEMA do
+  local field = CONFIG_SCHEMA[i]
+  local fields = SECTION_FIELDS[field.section]
+  if not fields then
+    fields = {}
+    SECTION_FIELDS[field.section] = fields
+  end
+  fields[#fields + 1] = field
 end
 
 -- ─── Sections ────────────────────────────────────────────────────────────────
@@ -138,11 +216,16 @@ local SECTIONS = {
       { key = "voltage_alert", labelKey = "voltage_alert", labelFallback = "Voltage" },
       { kind = "number", key = "voltage_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)",
         suffix = " s", enabledBy = "voltage_alert" },
+      { kind = "number", key = "voltage_reset", labelKey = "voltage_reset", labelFallback = "Reset (mV/cell)",
+        suffix = " mV", step = 50, enabledBy = "voltage_alert" },
       -- Its own subheader, because it is not a threshold on the pack voltage above but a
       -- different event that happens to be read off the same sensor.
       { kind = "subheader", labelKey = "section_main_power", labelFallback = "Main Power" },
       { kind = "bool", key = "main_power_lost", labelKey = "main_power_lost", labelFallback = "Main Power Lost" },
       { kind = "subheader", labelKey = "section_alert_behaviour", labelFallback = "Alert Behaviour" },
+      -- No enabledBy: besides the alert above it governs the main pack coming back and the pack
+      -- check on connect, which do not depend on the Voltage switch.
+      { kind = "choice", key = "voltage_announce", labelKey = "voltage_announce", labelFallback = "Announce as" },
       { kind = "choice", key = "voltage_repeat", labelKey = "alert_repeat", labelFallback = "Repeat" },
       { kind = "bool", key = "voltage_haptic", labelKey = "alert_haptic", labelFallback = "Haptic" },
     },
@@ -160,15 +243,29 @@ local SECTIONS = {
     titleFallback = "ESC Temperature",
     items = {
       { kind = "bool", key = "esc_temperature", labelKey = "esc_temperature", labelFallback = "ESC Temperature" },
-      { kind = "number", key = "esc_threshold", labelKey = "esc_threshold", labelFallback = "Threshold", suffix = "°C",
+      { kind = "number", key = "esc_threshold", labelKey = "esc_threshold", labelFallback = "Warning", suffix = "°C",
+        temperature = true, enabledBy = "esc_temperature" },
+      { kind = "number", key = "esc_critical", labelKey = "esc_critical", labelFallback = "Critical", suffix = "°C",
         temperature = true, enabledBy = "esc_temperature" },
       { kind = "subheader", labelKey = "section_mcu", labelFallback = "MCU Temperature" },
       { kind = "bool", key = "mcu_temperature", labelKey = "mcu_temperature", labelFallback = "MCU Temperature" },
-      -- The label of the ESC threshold, on purpose: the row says the same thing, and the
-      -- subheader above it is what tells the two thresholds apart. modelScopeLabel keys on
-      -- the row's own key, so this one carries no [Model] marker.
-      { kind = "number", key = "mcu_threshold", labelKey = "esc_threshold", labelFallback = "Threshold", suffix = "°C",
+      -- The labels of the ESC levels, on purpose: the rows say the same thing, and the
+      -- subheader above them is what tells the two pairs apart. modelScopeLabel keys on
+      -- the row's own key, so these carry no [Model] marker.
+      { kind = "number", key = "mcu_threshold", labelKey = "esc_threshold", labelFallback = "Warning", suffix = "°C",
         temperature = true, enabledBy = "mcu_temperature" },
+      { kind = "number", key = "mcu_critical", labelKey = "esc_critical", labelFallback = "Critical", suffix = "°C",
+        temperature = true, enabledBy = "mcu_temperature" },
+      -- The level labels of the link quality alert and the hold label of the voltage alert: the
+      -- rows mean the same thing, and the subheader says which alert they belong to.
+      { kind = "subheader", labelKey = "section_esc_load", labelFallback = "ESC Load" },
+      { kind = "bool", key = "esc_load", labelKey = "esc_load", labelFallback = "ESC Load" },
+      { kind = "number", key = "esc_load_warn", labelKey = "lq_warn", labelFallback = "Warning (%)", suffix = "%",
+        step = 5, enabledBy = "esc_load" },
+      { kind = "number", key = "esc_load_critical", labelKey = "lq_critical", labelFallback = "Critical (%)", suffix = "%",
+        step = 5, enabledBy = "esc_load" },
+      { kind = "number", key = "esc_load_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)",
+        suffix = " s", enabledBy = "esc_load" },
       { kind = "subheader", labelKey = "section_alert_behaviour", labelFallback = "Alert Behaviour" },
       { kind = "choice", key = "esc_repeat", labelKey = "alert_repeat", labelFallback = "Repeat" },
       { kind = "bool", key = "esc_haptic", labelKey = "alert_haptic", labelFallback = "Haptic" },
@@ -185,6 +282,57 @@ local SECTIONS = {
         enabledBy = "lq_alert" },
       { kind = "subheader", labelKey = "section_telemetry", labelFallback = "Telemetry" },
       { kind = "bool", key = "telemetry_lost", labelKey = "telemetry_lost", labelFallback = "Telemetry Lost" },
+      -- The level rows take the labels of the link quality rows above and the hold row the label of
+      -- the voltage page's: they say the same thing, and the subheader tells the alerts apart.
+      { kind = "subheader", labelKey = "section_tx_power", labelFallback = "TX Power" },
+      { kind = "bool", key = "tpwr_alert", labelKey = "tpwr_alert", labelFallback = "TX Power" },
+      { kind = "number", key = "tpwr_warn", labelKey = "lq_warn", labelFallback = "Warning (%)", suffix = "%",
+        enabledBy = "tpwr_alert" },
+      { kind = "number", key = "tpwr_critical", labelKey = "lq_critical", labelFallback = "Critical (%)", suffix = "%",
+        enabledBy = "tpwr_alert" },
+      { kind = "number", key = "tpwr_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)", suffix = " s",
+        enabledBy = "tpwr_alert" },
+      { kind = "bool", key = "tpwr_limit", labelKey = "tpwr_limit", labelFallback = "Own Maximum" },
+      { kind = "choice", key = "tpwr_max", labelKey = "tpwr_max", labelFallback = "Maximum (mW)", enabledBy = "tpwr_limit" },
+      -- The level labels of the link quality alert and the hold label of the voltage alert: the
+      -- rows mean the same thing, and the subheader says which alert they belong to.
+      { kind = "subheader", labelKey = "rssi_alert", labelFallback = "RSSI" },
+      { kind = "bool", key = "rssi_alert", labelKey = "rssi_alert", labelFallback = "RSSI" },
+      { kind = "number", key = "rssi_warn", labelKey = "lq_warn", labelFallback = "Warning (%)", suffix = "%",
+        enabledBy = "rssi_alert" },
+      { kind = "number", key = "rssi_critical", labelKey = "lq_critical", labelFallback = "Critical (%)", suffix = "%",
+        enabledBy = "rssi_alert" },
+      { kind = "number", key = "rssi_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)", suffix = " s",
+        enabledBy = "rssi_alert" },
+      { kind = "subheader", labelKey = "trss_alert", labelFallback = "Downlink" },
+      { kind = "bool", key = "trss_alert", labelKey = "trss_alert", labelFallback = "Downlink" },
+      { kind = "number", key = "trss_warn", labelKey = "lq_warn", labelFallback = "Warning (%)", suffix = "%",
+        enabledBy = "trss_alert" },
+      { kind = "number", key = "trss_critical", labelKey = "lq_critical", labelFallback = "Critical (%)", suffix = "%",
+        enabledBy = "trss_alert" },
+      { kind = "number", key = "trss_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)", suffix = " s",
+        enabledBy = "trss_alert" },
+      { kind = "subheader", labelKey = "rsnr_alert", labelFallback = "SNR" },
+      { kind = "bool", key = "rsnr_alert", labelKey = "rsnr_alert", labelFallback = "SNR" },
+      { kind = "number", key = "rsnr_warn", labelKey = "lq_warn", labelFallback = "Warning (%)", suffix = "%",
+        enabledBy = "rsnr_alert" },
+      { kind = "number", key = "rsnr_critical", labelKey = "lq_critical", labelFallback = "Critical (%)", suffix = "%",
+        enabledBy = "rsnr_alert" },
+      { kind = "number", key = "rsnr_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)", suffix = " s",
+        enabledBy = "rsnr_alert" },
+      { kind = "subheader", labelKey = "tsnr_alert", labelFallback = "Downlink SNR" },
+      { kind = "bool", key = "tsnr_alert", labelKey = "tsnr_alert", labelFallback = "Downlink SNR" },
+      { kind = "number", key = "tsnr_warn", labelKey = "lq_warn", labelFallback = "Warning (%)", suffix = "%",
+        enabledBy = "tsnr_alert" },
+      { kind = "number", key = "tsnr_critical", labelKey = "lq_critical", labelFallback = "Critical (%)", suffix = "%",
+        enabledBy = "tsnr_alert" },
+      { kind = "number", key = "tsnr_hold", labelKey = "voltage_hold", labelFallback = "Hold (s)", suffix = " s",
+        enabledBy = "tsnr_alert" },
+      { kind = "bool", key = "dropouts_alert", labelKey = "dropouts_alert", labelFallback = "Telemetry Dropouts" },
+      { kind = "number", key = "dropouts_count", labelKey = "dropouts_count", labelFallback = "Dropouts",
+        enabledBy = "dropouts_alert" },
+      { kind = "number", key = "dropouts_window", labelKey = "dropouts_window", labelFallback = "Window (s)",
+        suffix = " s", enabledBy = "dropouts_alert" },
       { kind = "subheader", labelKey = "section_alert_behaviour", labelFallback = "Alert Behaviour" },
       { kind = "choice", key = "link_repeat", labelKey = "alert_repeat", labelFallback = "Repeat" },
       { kind = "bool", key = "link_haptic", labelKey = "alert_haptic", labelFallback = "Haptic" },
@@ -228,6 +376,16 @@ local SECTIONS = {
         suffix = " mV", enabledBy = "pack_not_full" },
       { kind = "bool", key = "battery_profile", labelKey = "battery_profile", labelFallback = "Battery Capacity" },
       { kind = "bool", key = "initial_fuel", labelKey = "initial_fuel", labelFallback = "SmartFuel" },
+    },
+  },
+  -- Two events rather than an alert, so no Repeat and no Haptic: the pilot usually starts a rescue
+  -- himself, and a confirmation is all it needs.
+  rescue = {
+    titleKey = "section_rescue",
+    titleFallback = "Rescue",
+    items = {
+      { kind = "bool", key = "rescue_active", labelKey = "rescue_active", labelFallback = "Rescue Active" },
+      { kind = "bool", key = "rescue_off", labelKey = "rescue_off", labelFallback = "Rescue Off" },
     },
   },
 }
@@ -275,7 +433,9 @@ local ROW_HELP = {
     return {
       voltage_alert = t(i18n, "help_voltage_alert"),
       voltage_hold = t(i18n, "help_voltage_hold"),
+      voltage_reset = t(i18n, "help_voltage_reset"),
       main_power_lost = t(i18n, "help_main_power_lost"),
+      voltage_announce = t(i18n, "help_voltage_announce"),
       voltage_repeat = t(i18n, "help_voltage_repeat"),
       voltage_haptic = t(i18n, "help_voltage_haptic"),
     }
@@ -290,8 +450,14 @@ local ROW_HELP = {
     return {
       esc_temperature = t(i18n, "help_esc_temperature"),
       esc_threshold = t(i18n, "help_esc_threshold"),
+      esc_critical = t(i18n, "help_esc_critical"),
       mcu_temperature = t(i18n, "help_mcu_temperature"),
       mcu_threshold = t(i18n, "help_mcu_threshold"),
+      esc_load = t(i18n, "help_esc_load"),
+      esc_load_warn = t(i18n, "help_esc_load_warn"),
+      esc_load_critical = t(i18n, "help_esc_load_critical"),
+      esc_load_hold = t(i18n, "help_esc_load_hold"),
+      mcu_critical = t(i18n, "help_mcu_critical"),
       esc_repeat = t(i18n, "help_esc_repeat"),
       esc_haptic = t(i18n, "help_esc_haptic"),
     }
@@ -315,13 +481,51 @@ local ROW_HELP = {
       lq_warn = t(i18n, "help_lq_warn"),
       lq_critical = t(i18n, "help_lq_critical"),
       telemetry_lost = t(i18n, "help_telemetry_lost"),
+      tpwr_alert = t(i18n, "help_tpwr_alert"),
+      tpwr_warn = t(i18n, "help_tpwr_warn"),
+      tpwr_critical = t(i18n, "help_tpwr_critical"),
+      tpwr_hold = t(i18n, "help_tpwr_hold"),
+      tpwr_limit = t(i18n, "help_tpwr_limit"),
+      tpwr_max = t(i18n, "help_tpwr_max"),
+      rssi_alert = t(i18n, "help_rssi_alert"),
+      rssi_warn = t(i18n, "help_headroom_warn"),
+      rssi_critical = t(i18n, "help_headroom_critical"),
+      rssi_hold = t(i18n, "help_headroom_hold"),
+      trss_alert = t(i18n, "help_trss_alert"),
+      trss_warn = t(i18n, "help_headroom_warn"),
+      trss_critical = t(i18n, "help_headroom_critical"),
+      trss_hold = t(i18n, "help_headroom_hold"),
+      rsnr_alert = t(i18n, "help_rsnr_alert"),
+      rsnr_warn = t(i18n, "help_snr_warn"),
+      rsnr_critical = t(i18n, "help_snr_critical"),
+      rsnr_hold = t(i18n, "help_snr_hold"),
+      tsnr_alert = t(i18n, "help_tsnr_alert"),
+      tsnr_warn = t(i18n, "help_snr_warn"),
+      tsnr_critical = t(i18n, "help_snr_critical"),
+      tsnr_hold = t(i18n, "help_snr_hold"),
+      dropouts_alert = t(i18n, "help_dropouts_alert"),
+      dropouts_count = t(i18n, "help_dropouts_count"),
+      dropouts_window = t(i18n, "help_dropouts_window"),
       link_repeat = t(i18n, "help_link_repeat"),
       link_haptic = t(i18n, "help_link_haptic"),
+    }
+  end,
+  rescue = function(t, i18n)
+    return {
+      rescue_active = t(i18n, "help_rescue_active"),
+      rescue_off = t(i18n, "help_rescue_off"),
     }
   end,
 }
 
 local FUEL_CALLOUT_VALUES = { [0] = true, [5] = true, [10] = true, [20] = true, [25] = true, [50] = true }
+
+-- The own maximum of the TX power alert, in mW: the power steps ExpressLRS offers above its lowest
+-- (TXModuleParameters.cpp, strPowerLevels), which is also the list the Urban theme's own power
+-- limit offers.
+local TX_POWER_MAX_LIST = { 25, 50, 100, 250, 500, 1000, 2000 }
+local TX_POWER_MAX_VALUES = {}
+for i = 1, #TX_POWER_MAX_LIST do TX_POWER_MAX_VALUES[TX_POWER_MAX_LIST[i]] = true end
 
 -- The per-model store hangs off the session and exists only once the flight controller's
 -- id has been read, so every caller here has to cope with it being absent. The session is
@@ -350,11 +554,12 @@ end
 local function saveModelStore()
   local session = modelStore()
   if not session then return true end
+  -- A module that will not load answers as saveByMcuId does when it has no store: "unavailable".
   local chunk = loadScript("/SCRIPTS/TOOLS/rfsuite-core/lib/model_preferences.lua", "t")
-  if type(chunk) ~= "function" then return false, "model_preferences" end
+  if type(chunk) ~= "function" then return false, "unavailable" end
   local loaded, MP = pcall(chunk)
   if not (loaded and type(MP) == "table" and type(MP.saveByMcuId) == "function") then
-    return false, "model_preferences"
+    return false, "unavailable"
   end
   return MP.saveByMcuId(session.mcu_id, session.modelPreferences)
 end
@@ -364,10 +569,11 @@ local function prefBool(value, default)
   return value == true or value == "true" or value == 1 or value == "1"
 end
 
--- The two temperature thresholds are stored in Celsius, the unit the flight controller reports
--- and lib/audio.lua compares in. On a radio set to Fahrenheit under Settings > Localization they
--- are shown in Fahrenheit, like every other temperature the suite shows. Only the text changes:
--- the control still steps one degree Celsius and stores what it shows, so nothing is rounded twice.
+-- The four temperature levels (ESC and MCU, warning and critical) are stored in Celsius, the
+-- unit the flight controller reports and lib/audio.lua compares in. On a radio set to
+-- Fahrenheit under Settings > Localization they are shown in Fahrenheit, like every other
+-- temperature the suite shows. Only the text changes: the control still steps one degree
+-- Celsius and stores what it shows, so nothing is rounded twice.
 local function usesFahrenheit(prefs)
   local localizations = prefs and prefs.localizations
   return tonumber(localizations and localizations.temperature_unit) == 1
@@ -403,7 +609,9 @@ function M.new(sectionKey)
       fuelCalloutGet = nil,
       fuelCalloutSet = nil,
       fuelHapticGet = nil,
-      fuelHapticSet = nil
+      fuelHapticSet = nil,
+      announceGet = nil,
+      announceSet = nil
     }
   }
   ui.runtimeBase = nil
@@ -419,6 +627,8 @@ function M.new(sectionKey)
   local function ownsField(field)
     return field.section == sectionKey
   end
+
+  local ownFields = SECTION_FIELDS[sectionKey] or {}
 
   local function ensureDeps()
     if not Common then
@@ -572,6 +782,71 @@ function M.new(sectionKey)
     return cache[key]
   end
 
+  -- The TX power alert's own maximum: a power step out of TX_POWER_MAX_LIST, shown in mW as the
+  -- row's label says. A stored value that is not one of them reads as the default.
+  local function getTxPowerMaxOptions()
+    local options = {}
+    for i = 1, #TX_POWER_MAX_LIST do
+      local mw = TX_POWER_MAX_LIST[i]
+      options[i] = { value = mw, label = tostring(mw) }
+    end
+    return options
+  end
+
+  local function getTxPowerMaxGetter()
+    if ui.runtime.txPowerMaxGet then return ui.runtime.txPowerMaxGet end
+    ui.runtime.txPowerMaxGet = function()
+      local value = tonumber(ui.config.tpwr_max) or 100
+      if not TX_POWER_MAX_VALUES[value] then return 100 end
+      return value
+    end
+    return ui.runtime.txPowerMaxGet
+  end
+
+  local function getTxPowerMaxSetter()
+    if ui.runtime.txPowerMaxSet then return ui.runtime.txPowerMaxSet end
+    ui.runtime.txPowerMaxSet = function(value)
+      if ui.config.tpwr_limit ~= true then return end
+      local nextValue = tonumber(value) or 100
+      if not TX_POWER_MAX_VALUES[nextValue] then nextValue = 100 end
+      if ui.config.tpwr_max ~= nextValue then
+        ui.config.tpwr_max = nextValue
+        ui.runtime.markDirty()
+      end
+    end
+    return ui.runtime.txPowerMaxSet
+  end
+
+  -- How a flight-pack voltage is spoken. Two values, so its own pair rather than the repeat
+  -- row's, which would let a hand-edited value outside them through.
+  local function getAnnounceOptions(i18n)
+    return {
+      { value = 0, label = t(i18n, "voltage_announce_pack", "Pack") },
+      { value = 1, label = t(i18n, "voltage_announce_cell", "Cell") },
+    }
+  end
+
+  local function getAnnounceGetter()
+    if ui.runtime.announceGet then return ui.runtime.announceGet end
+    ui.runtime.announceGet = function()
+      if tonumber(ui.config.voltage_announce) == 1 then return 1 end
+      return 0
+    end
+    return ui.runtime.announceGet
+  end
+
+  local function getAnnounceSetter()
+    if ui.runtime.announceSet then return ui.runtime.announceSet end
+    ui.runtime.announceSet = function(value)
+      local nextValue = (tonumber(value) == 1) and 1 or 0
+      if ui.config.voltage_announce ~= nextValue then
+        ui.config.voltage_announce = nextValue
+        ui.runtime.markDirty()
+      end
+    end
+    return ui.runtime.announceSet
+  end
+
   local function getFuelHapticGetter()
     if ui.runtime.fuelHapticGet then return ui.runtime.fuelHapticGet end
     ui.runtime.fuelHapticGet = function(nextVal)
@@ -598,25 +873,23 @@ function M.new(sectionKey)
   local function copyFromPrefs(prefs)
     local audio_events = (prefs and prefs.audio_events) or {}
     local modelEvents = modelAudioEvents(false)
-    for _, field in ipairs(CONFIG_SCHEMA) do
-      if ownsField(field) then
-        local raw = audio_events[field.key]
-        if field.scope == "model" and modelEvents and modelEvents[field.key] ~= nil then
-          raw = modelEvents[field.key]
-        end
-        if field.type == "number" then
-          ui.config[field.key] = tonumber(raw) or field.default
-        else
-          ui.config[field.key] = prefBool(raw, field.default)
-        end
+    for _, field in ipairs(ownFields) do
+      local raw = audio_events[field.key]
+      if field.scope == "model" and modelEvents and modelEvents[field.key] ~= nil then
+        raw = modelEvents[field.key]
+      end
+      if field.type == "number" then
+        ui.config[field.key] = tonumber(raw) or field.default
+      else
+        ui.config[field.key] = prefBool(raw, field.default)
       end
     end
 
     -- A stored value outside the schema's range is brought back into it, so that the number
     -- on screen is one the control could have produced. The bounds are the schema's, which
     -- is the same pair the control below is built with.
-    for _, field in ipairs(CONFIG_SCHEMA) do
-      if ownsField(field) and field.type == "number" then
+    for _, field in ipairs(ownFields) do
+      if field.type == "number" then
         local value = ui.config[field.key]
         if field.min and value < field.min then value = field.min end
         if field.max and value > field.max then value = field.max end
@@ -624,13 +897,12 @@ function M.new(sectionKey)
       end
     end
     if not FUEL_CALLOUT_VALUES[ui.config.fuel_callout_percent] then ui.config.fuel_callout_percent = 10 end
+    if not TX_POWER_MAX_VALUES[ui.config.tpwr_max] then ui.config.tpwr_max = 100 end
 
     -- After the clamps, so that correcting an out-of-range stored value does not read as an
     -- edit the pilot made.
-    for _, field in ipairs(CONFIG_SCHEMA) do
-      if ownsField(field) then
-        loadedConfig[field.key] = ui.config[field.key]
-      end
+    for _, field in ipairs(ownFields) do
+      loadedConfig[field.key] = ui.config[field.key]
     end
   end
 
@@ -640,16 +912,20 @@ function M.new(sectionKey)
     ui.loaded = true
   end
 
-  -- The threshold is edited in the model's own store while a flight controller is connected and
-  -- in the radio's file otherwise, and nothing on the page says which: a number entered with a
-  -- model connected reads as the radio-wide default it no longer is. So the label carries a
-  -- marker exactly while the model's store is the one being written.
+  -- The ESC's two levels are edited in the model's own store while a flight controller is
+  -- connected and in the radio's file otherwise, and nothing on the page says which: a number
+  -- entered with a model connected reads as the radio-wide default it no longer is. So the label
+  -- carries a marker exactly while the model's store is the one being written.
   --
-  -- The key is spelled out here rather than taken from the schema entry, because the packager
+  -- The keys are spelled out here rather than taken from the schema entry, because the packager
   -- resolves a translation whose key is a literal and a computed one would reach the radio raw.
   local function modelScopeLabel(i18n, key, plain)
-    if key ~= "esc_threshold" or not modelStore() then return plain end
-    return t(i18n, "esc_threshold_model", "Threshold [Model]")
+    if key == "esc_threshold" then
+      if modelStore() then return t(i18n, "esc_threshold_model", "Warning [Model]") end
+    elseif key == "esc_critical" then
+      if modelStore() then return t(i18n, "esc_critical_model", "Critical [Model]") end
+    end
+    return plain
   end
 
   -- A row's `?` opens the same sheet as the header's, through the host's openHelp, with the row's
@@ -702,6 +978,12 @@ function M.new(sectionKey)
     local modelEvents = modelAudioEvents(false)
     local modelDirty = false
     local modelScoped = false
+    -- What this save changes in the session's model table, so that a failed write of the model's
+    -- file can put it back. The next save decides whether to write that file by comparing the page
+    -- against this table, so a value left in it by a write that failed reads as saved: that save
+    -- writes nothing and answers success, and the value is gone at the next start.
+    local modelChanged, modelPrevious = {}, {}
+    local modelEventsCreated = false
     for _, field in ipairs(CONFIG_SCHEMA) do
       if ownsField(field) then
         local toModel = false
@@ -710,12 +992,19 @@ function M.new(sectionKey)
           if modelEvents and modelEvents[field.key] ~= nil then
             toModel = true
           elseif loadedConfig[field.key] ~= nil and ui.config[field.key] ~= loadedConfig[field.key] then
-            modelEvents = modelEvents or modelAudioEvents(true)
+            if not modelEvents then
+              modelEvents = modelAudioEvents(true)
+              modelEventsCreated = modelEvents ~= nil
+            end
             toModel = modelEvents ~= nil
           end
         end
         if toModel then
-          if modelEvents[field.key] ~= ui.config[field.key] then modelDirty = true end
+          if modelEvents[field.key] ~= ui.config[field.key] then
+            modelDirty = true
+            modelChanged[#modelChanged + 1] = field.key
+            modelPrevious[field.key] = modelEvents[field.key]
+          end
           modelEvents[field.key] = ui.config[field.key]
         else
           ctx.preferences.audio_events[field.key] = ui.config[field.key]
@@ -726,6 +1015,17 @@ function M.new(sectionKey)
     local modelOk, modelErr = true, nil
     if modelDirty then
       modelOk, modelErr = saveModelStore()
+      if not modelOk then
+        -- The session's table goes back to what it held before this save: a key this save added
+        -- is removed again, and so is a table this save created.
+        for i = 1, #modelChanged do
+          modelEvents[modelChanged[i]] = modelPrevious[modelChanged[i]]
+        end
+        local session = modelEventsCreated and modelStore() or nil
+        if session and session.modelPreferences.audio_events == modelEvents then
+          session.modelPreferences.audio_events = nil
+        end
+      end
     end
 
     -- Diagnostic logging for save flow
@@ -767,8 +1067,9 @@ function M.new(sectionKey)
     end
 
     -- Both stores, because a save is only done when both were believed.
+    local errModel = false
     if ok and not modelOk then
-      ok, err = false, modelErr
+      ok, err, errModel = false, modelErr, true
     end
 
     if ok then
@@ -782,7 +1083,7 @@ function M.new(sectionKey)
         pcall(Log.emit, "rfsuite", "onSave: savePreferences failed: " .. tostring(err or "?"), "error")
       end
       if ctx and type(ctx.reportSave) == "function" then
-        ctx.reportSave({ title = t(ctx.i18n, "save_error_title", "Error"), message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. tostring(err or "io") })
+        ctx.reportSave({ title = t(ctx.i18n, "save_error_title", "Error"), message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. Common.saveFailureReason(ctx.i18n, err, errModel) })
       end
       return false
     end
@@ -816,6 +1117,10 @@ function M.new(sectionKey)
         local options, selected, onSelect
         if k == "fuel_callout_percent" then
           options, selected, onSelect = getFuelCalloutOptions(i18n), getFuelCalloutGetter()(), getFuelCalloutSetter()
+        elseif k == "voltage_announce" then
+          options, selected, onSelect = getAnnounceOptions(i18n), getAnnounceGetter()(), getAnnounceSetter()
+        elseif k == "tpwr_max" then
+          options, selected, onSelect = getTxPowerMaxOptions(), getTxPowerMaxGetter()(), getTxPowerMaxSetter()
         else
           options, selected, onSelect = getRepeatOptions(i18n), getRepeatGetter(k)(), getRepeatSetter(k, item.enabledBy)
         end
@@ -843,6 +1148,7 @@ function M.new(sectionKey)
             enabled = getNumberEnabled(item.enabledBy),
             min = minVal,
             max = maxVal,
+            step = item.step,
             suffix = item.suffix or "",
             display = display,
             get = getNumberGetter(k, minVal, maxVal),
@@ -885,6 +1191,11 @@ function M.new(sectionKey)
     Controls = nil
     Common = nil
     t = nil
+  end
+
+  -- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+  function page.hasUnsavedChanges()
+    return ui.dirty == true
   end
 
   return page

@@ -157,15 +157,27 @@ M.T = {
   view_tools = "@i18n(widgets.dashboard.urban_profile_tuning)@",
   view_telemetry = "@i18n(widgets.dashboard.urban_telemetry)@",
   no_tiles = "@i18n(widgets.dashboard.urban_no_tiles)@",
+  -- The status view (statusview.lua): its title, the arm word in capitals, what the line under it
+  -- says while nothing blocks arming, and its event history -- the caption, the words for a
+  -- connection made, and what the list says while it is empty. The speed controller's column
+  -- carries the short name every language uses, as `tpwr` and `skp` do.
+  view_status = "@i18n(widgets.dashboard.urban_status)@",
+  armed_caps = "@i18n(widgets.dashboard.urban_armed):upper()@",
+  disarmed_caps = "@i18n(widgets.dashboard.urban_disarmed):upper()@",
+  ready_to_arm = "@i18n(widgets.dashboard.urban_ready_to_arm)@",
+  event_log = "@i18n(widgets.dashboard.urban_event_log)@",
+  connected = "@i18n(widgets.dashboard.urban_connected)@",
+  no_events = "@i18n(widgets.dashboard.urban_no_events)@",
+  esc = "ESC",
   blackbox = "@i18n(app.modules.blackbox.name)@",
   active = "@i18n(widgets.dashboard.urban_active)@",
   unavailable = "@i18n(widgets.dashboard.urban_not_available)@",
   run_busy = "@i18n(widgets.dashboard.urban_sending)@",
   run_ok = "@i18n(widgets.dashboard.urban_done)@",
   run_failed = "@i18n(widgets.dashboard.urban_failed)@",
-  link_floor = "@i18n(widgets.dashboard.urban_rate_floor)@",
   -- The link view's title is the link protocol's name, and its rows carry short sensor names, the
-  -- same in every language -- as `tpwr` and `skp` above.
+  -- same in every language -- as `tpwr` and `skp` above. Its foot line names the flight's least
+  -- link quality.
   view_link = "ELRS",
   link_rq = "RQ", link_tq = "TQ", link_rss1 = "1RSS", link_rss2 = "2RSS",
   -- The battery view (battview.lua): its title, the words of the cell limits under the bar, and
@@ -177,6 +189,8 @@ M.T = {
   batt_pack = "@i18n(widgets.dashboard.urban_batt_pack)@",
   batt_cell_min = "@i18n(widgets.dashboard.urban_cell_min)@",
   batt_reserve = "@i18n(widgets.dashboard.urban_reserve)@",
+  link_trss = "TRSS", link_snr = "SNR",
+  link_rq_min = "@i18n(widgets.dashboard.urban_rq_min)@",
 }
 
 -- The governor states' keys, built once: M.governorText and M.governorSample read them every
@@ -818,6 +832,34 @@ function M.option(state, key, values, default)
   return default
 end
 
+-- A whole percentage from 0 to 100, or the default where nothing usable is stored. A number
+-- outside the range is pulled to its edge and a fraction is cut to the whole number below it,
+-- so a hand-edited file still draws with a step the settings page could have set; anything that
+-- is not a number at all is no choice made.
+function M.percent(state, key, default)
+  local v = tonumber(configValue(state, key))
+  if v == nil or v ~= v then return default end
+  if v < 0 then return 0 end
+  if v > 100 then return 100 end
+  return math.floor(v)
+end
+
+-- The battery gauge's two steps, in percent of the fuel reading: yellow at or below the first,
+-- red at or below the second. The defaults are the steps the gauge has always drawn with.
+M.FUEL_LOW_DEFAULT = 20
+M.FUEL_CRIT_DEFAULT = 0
+
+-- Both steps as the gauge uses them. Red is never above yellow: the settings page does not let a
+-- pilot set it there, and a stored pair that has it there anyway -- a hand-edited file, say -- is
+-- drawn with red pulled down to yellow, so a reading can never be red while a higher one is still
+-- yellow.
+function M.fuelSteps(state)
+  local low = M.percent(state, "fuel_low", M.FUEL_LOW_DEFAULT)
+  local crit = M.percent(state, "fuel_crit", M.FUEL_CRIT_DEFAULT)
+  if crit > low then crit = low end
+  return low, crit
+end
+
 -- The two clock modes, with the format string and the WIDTH SAMPLE of each in one place.
 --
 -- The top bar measures the clock's width against the sample, so the two have to agree: a format
@@ -943,10 +985,13 @@ function M.fuel(state)
 end
 
 -- The fuel reading, decoded once per value change and shared by every node that follows it:
--- the ten gauge rows all ask this one closure, so the three-step colour is computed once per
--- change rather than once per row per frame, and no two rows can disagree about it.
+-- the ten gauge rows all ask this one closure, so the colour is computed once per change rather
+-- than once per row per frame, and no two rows can disagree about it.
 function M.fuelLevel(state)
-  local last, lastColor = UNSET, M.C.empty
+  local last, lastNotFull, lastColor = UNSET, nil, M.C.empty
+  -- The steps are settings, read once here, when the gauge is built: the host rebuilds the
+  -- theme when its settings change, so no frame reads the configuration.
+  local low, crit = M.fuelSteps(state)
   return function()
     -- With the main pack gone the fuel figure is not low, it is no longer being measured:
     -- the gauge empties rather than freezing on the last reading it took.
@@ -960,14 +1005,20 @@ function M.fuelLevel(state)
       p = state.fuel
       if type(p) ~= "number" then p = nil end
     end
-    if p == last then return p, lastColor end
-    last = p
-    -- Critical at nothing left, low within twenty points of it, full otherwise. A fourth colour
-    -- for a pack that was not full when it was plugged in would need a verdict latched at the
-    -- connect, and a theme has no pass of its own to latch it in.
+    -- The host's verdict on the pack that was plugged in (`packNotFull`, judged once per
+    -- connection). It is part of the key as well as the reading: it arrives after the first fuel
+    -- reading, because it waits for the battery configuration over MSP, and a key on the reading
+    -- alone would keep the colour decided before it for as long as the reading stands still.
+    local notFull = state.packNotFull == true
+    if p == last and notFull == lastNotFull then return p, lastColor end
+    last, lastNotFull = p, notFull
+    -- Critical at or below the red step, low at or below the yellow step. Above that, orange for
+    -- a pack that was not full when it was plugged in and green for one that was: low and
+    -- critical say more about the pack in hand than how it started, so they come first.
     if p == nil then lastColor = M.C.empty
-    elseif p <= 0 then lastColor = M.C.bar_crit
-    elseif p <= 20 then lastColor = M.C.bar_low
+    elseif p <= crit then lastColor = M.C.bar_crit
+    elseif p <= low then lastColor = M.C.bar_low
+    elseif notFull then lastColor = M.C.bar_warn
     else lastColor = M.C.bar_ok end
     return p, lastColor
   end

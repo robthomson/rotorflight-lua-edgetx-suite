@@ -15,6 +15,21 @@ local M = {}
 
 local recorded = false
 
+-- The pack the model's store held when the craft armed, out of the copy already in memory -- no
+-- card read. Only the disarm task's last resort: the MSP runtime drops the board's identity, and
+-- the store with it, the moment the link goes, and reads it again only once the craft has
+-- disarmed, so after a dropout in flight the disarm finds no store to ask. The same conversion
+-- as lib/flight_log.lua's storedBatteryId, which this task does not load.
+local function storedPick(modelPreferences)
+  local section = type(modelPreferences) == "table" and modelPreferences.flightlog or nil
+  local value = type(section) == "table" and section.battery or nil
+  if type(value) == "number" then value = string.format("%s", value) end
+  if type(value) ~= "string" then return nil end
+  value = string.match(value, "^%s*(.-)%s*$")
+  if value == "" then return nil end
+  return value
+end
+
 function M.wakeup()
   if recorded then return end
   recorded = true
@@ -38,14 +53,16 @@ function M.wakeup()
   -- The pack chosen for the connection, and the pack a use has already been counted against,
   -- both outlive one flight. They are carried over from the record the previous flight left.
   local previous = type(session.flightlog) == "table" and session.flightlog or nil
+  local batteryId = previous and previous.batteryId or nil
 
   session.flightlog = {
     open = true,
     startTicks = startTicks,
     startDate = startDate,
     model = session.modelName,
-    batteryId = previous and previous.batteryId or nil,
-    countedFor = previous and previous.countedFor or nil
+    batteryId = batteryId,
+    countedFor = previous and previous.countedFor or nil,
+    batteryAtArm = batteryId or storedPick(session.modelPreferences)
   }
 end
 

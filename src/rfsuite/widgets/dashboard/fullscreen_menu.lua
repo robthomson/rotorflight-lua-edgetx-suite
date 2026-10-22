@@ -22,6 +22,8 @@ end
 -- actions an `after` may name.
 local Views = requireModule("widgets/dashboard/views.lua")
 
+local Log = requireModule("lib/log.lua")
+
 -- An entry without `visibleWhen` is always there. A named condition is resolved in views.lua,
 -- where a name that is not known is false and hides its entry, which is what an unresolvable
 -- condition does in `app/menu_registry.lua` as well.
@@ -30,6 +32,30 @@ local function isEntryVisible(entry, widget)
   if conditionKey == nil then return true end
   if not (Views and type(Views.condition) == "function") then return false end
   return Views.condition(conditionKey, widget) == true
+end
+
+-- Whether a press on a row is refused because the menu does not offer that row now. A refused
+-- press does nothing, nothing follows it, and the surface is built again, so the row is gone.
+--
+-- Hiding the row is not enough on its own: a view is built again only when its key changes, and
+-- the arm edge does not change the menu's, so a menu that was open when the model armed -- or a
+-- theme's page drawn from the same records -- still shows the row, and an ERASE answered after
+-- the arm was asked before it. The work would come to nothing anyway: the MSP runtime clears its
+-- queue on every pass while the model is armed (tasks/msp/runtime.lua).
+--
+-- What is checked is the row itself: an action, the button that opens a view, or an option of a
+-- grid the menu draws. The options of a `choice` that names a `view` are pressed in that view,
+-- which keeps its own rules -- the runtime refuses a battery pick made while armed -- and its
+-- close has to work whatever the state.
+local function refused(widget, entry, option)
+  if option ~= nil and entry.view ~= nil then return false end
+  if isEntryVisible(entry, widget) then return false end
+  if Log and type(Log.emit) == "function" then
+    Log.emit("rfsuite.widget", "entry '" .. tostring(entry.id) .. "' not run: it is not offered now", "warn")
+  end
+  widget.built = false
+  widget.renderKey = nil
+  return true
 end
 
 -- A button's press: the row's own work, if it has any, and then the action that follows it.
@@ -206,6 +232,9 @@ function BUILD.erase_blackbox(widget, t)
   -- question and `M.run` holds the press behind it: nothing is queued, and full screen is not
   -- left, until the pilot has agreed. `detail` is omitted where no summary has been read, so the
   -- question is the same shape with or without a number in it.
+  --
+  -- Offered only while the model is disarmed: the MSP runtime drops every queued message while
+  -- it is armed, so an erase pressed in the air would never be sent.
   local confirm = {
     title = t("widgets.dashboard.erase_blackbox_confirm_title", "ERASE BLACKBOX"),
     message = t("widgets.dashboard.erase_blackbox_confirm_message",
@@ -224,6 +253,7 @@ function BUILD.erase_blackbox(widget, t)
     id = "erase_blackbox",
     kind = "action",
     title = t("widgets.dashboard.erase_blackbox", "ERASE BLACKBOX"),
+    visibleWhen = "modelDisarmed",
     confirm = confirm,
     press = function(report)
          local mspModule = requireModule("tasks/msp/runtime.lua")
@@ -333,11 +363,14 @@ function BUILD.flight_log(widget, t)
   }
 end
 
+-- Offered only while the model is disarmed, like ERASE BLACKBOX: a profile write pressed in the
+-- air is dropped with the rest of the MSP queue.
 function BUILD.battery_profile(widget, t)
   return {
     id = "battery_profile",
     kind = "choice",
     title = t("widgets.dashboard.battery_profile", "BATTERY PROFILE"),
+    visibleWhen = "modelDisarmed",
     -- One option per capacity the flight controller carries, resolved when the row is drawn
     -- rather than when the list is made, so an entry stays a description of what it offers. The
     -- widget is the one this list was made for where the caller passes none.
@@ -509,8 +542,11 @@ function M.visible(widget, entry)
 end
 
 -- The work a press does and the action that follows it, in that order. Split out of `run` so
--- that a press which must be confirmed can be performed from the answer instead of here.
-local function perform(widget, source, after, report)
+-- that a press which must be confirmed can be performed from the answer instead of here. The
+-- row is asked again here because an answer can come after the row has stopped being offered.
+local function perform(widget, entry, option, after, report)
+  if refused(widget, entry, option) then return end
+  local source = option or entry
   if type(source.press) == "function" then source.press(report) end
   if after == nil then after = source.after end
   if Views and type(Views.navigate) == "function" then Views.navigate(widget, after) end
@@ -531,22 +567,27 @@ end
 -- A `choice` entry's own `confirm` guards every option it runs; an option that carries one is
 -- held by its own question, which is preferred where both carry one.
 --
+-- A row the menu does not offer now -- its `visibleWhen` does not hold -- is refused, here and
+-- again when a question is answered (see `refused`): a surface built before the change still
+-- draws it, and a theme can hand in any record.
+--
 -- This runs whatever it is handed: the `press` of the table it is given, with no check of where
 -- that table came from. A caller resolves first and passes only the menu's own records -- the
 -- menu's buttons and the picker take theirs from M.entries / M.entry, and anything a theme hands
 -- in goes through M.resolve (as ctx.run in views.lua does). A caller that skips that step lets a
 -- theme put work of its own behind one of the menu's entries.
 function M.run(widget, entry, option, after, report)
+  if refused(widget, entry, option) then return end
   local source = option or entry
   if after == nil then after = source.after end
   local confirm = (option and option.confirm) or entry.confirm
   if type(confirm) == "table" then
     if Views and type(Views.confirm) == "function" then
-      Views.confirm(widget, confirm, function() perform(widget, source, after, report) end)
+      Views.confirm(widget, confirm, function() perform(widget, entry, option, after, report) end)
     end
     return
   end
-  perform(widget, source, after, report)
+  perform(widget, entry, option, after, report)
 end
 
 --- Draw the menu.

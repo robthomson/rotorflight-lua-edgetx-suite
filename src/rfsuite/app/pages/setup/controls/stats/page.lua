@@ -373,6 +373,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second save beside the running one
+  -- would send the same write again, with a second EEPROM write.
+  if ui.saving then return false end
   local ok, err = queueStatsWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -387,6 +390,8 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- Nothing is read under a running save; Reload works again once the save has finished.
+  if ui.saving then return true end
   local session = getSession()
   if session then
     ui.dirty = false
@@ -420,6 +425,11 @@ function M.onClose()
   ConfirmDialog = nil
   ApiVersion = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

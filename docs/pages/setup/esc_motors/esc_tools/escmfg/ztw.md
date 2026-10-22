@@ -82,7 +82,7 @@ only where the connected ESC reports that setting as one of its own.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 - [ZTW](https://ztwesc.com/) -- what each of these settings does inside the ESC, and which
   models and firmware versions have it.
 

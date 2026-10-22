@@ -113,6 +113,7 @@ end
 
 local function queueRcRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not MspRuntime or not RcConfigApi or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -123,6 +124,7 @@ local function queueRcRead(isAutoReload)
     return false, "msp_queue_unavailable"
   end
 
+  local readValid = true
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -137,6 +139,7 @@ local function queueRcRead(isAutoReload)
     simulatorResponse = RcConfigApi.simulatorResponse,
     processReply = function(self, buf)
       local parsed = RcConfigApi.parse(buf)
+      if type(parsed) ~= "table" then return Common.failPageRead(ui) end
       if parsed then
         ui.config.rc_center = parsed.rc_center
         ui.config.rc_deflection = parsed.rc_deflection
@@ -167,11 +170,13 @@ local function queueRcRead(isAutoReload)
       ui.loading = false
       ui.dirty = false
       ui.progress = 100
+      ui.runtime.readComplete = readValid
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
       end
     end,
     errorHandler = function()
+      readValid = false
       ui.runtime.readPending = false
       ui.loading = false
       if type(ui.runtime.requestRebuild) == "function" then
@@ -555,7 +560,12 @@ function M.build(ctx)
   end
 end
 
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
+  if not M.canSave() then return false, "loaded_data_missing" end
   local ok, err = queueRcWrite()
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -609,6 +619,11 @@ function M.onClose()
   ApiVersion = nil
   LoadingOverlay = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

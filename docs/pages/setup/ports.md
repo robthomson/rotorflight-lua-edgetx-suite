@@ -45,6 +45,6 @@ is greyed out, and a save keeps that port as it was.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

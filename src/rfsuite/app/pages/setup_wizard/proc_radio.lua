@@ -36,6 +36,82 @@ local t = Common and Common.pageT("setup_wizard") or function(_, _, fb) return f
 -- that default is what a locale without the key falls back to.
 local tLink = Common and Common.pageT("diagnostics_elrs_link") or function(_, _, fb) return fb end
 
+-- Loaded on the first question, by the Link step and by the channel writes alike.
+local ConfirmDialog = nil
+
+-- The channel writes replace their inputs at fixed indices, and another channel's mixer may be
+-- built on one of them: on a model laid out by hand, the input numbered for arming can be a gyro
+-- gain feeding CH9, and replacing it puts the arm switch on CH9. So where another channel uses an
+-- input about to be replaced, the press asks first and names the channels. Nothing to name, no
+-- question, and the press goes on (false). Otherwise the press ends here (true, `done(false)`):
+-- a yes presses again with the question it answered kept in `w.data[flag]`, and the next press goes
+-- on only if it would ask exactly that question again -- a plan re-derived while the question stood
+-- is asked about anew. A no, or a radio that cannot put the question up, writes nothing and leaves
+-- `w.data[noticeKey]` saying so. Channels the same press lays out are not named: their own lines
+-- are replaced anyway.
+local function askInputsInUse(w, entries, flag, noticeKey, done)
+  local answered = w.data[flag]
+  w.data[flag] = nil
+
+  local writing = {}
+  for _, entry in ipairs(entries) do writing[entry.channel] = true end
+
+  local i18n = w.i18n
+  local lines = {}
+  for _, entry in ipairs(entries) do
+    local users = w.radio.inputUsers(entry.input, entry.channel)
+    local names = {}
+    for _, channel in ipairs(users or {}) do
+      if not writing[channel] then names[#names + 1] = "CH" .. tostring(channel) end
+    end
+    if #names > 0 then
+      lines[#lines + 1] = "I" .. tostring(entry.input + 1) .. " (CH" .. tostring(entry.channel) ..
+        "): " .. table.concat(names, ", ")
+    end
+  end
+  if #lines == 0 then return false end
+  local asked = table.concat(lines, "\n")
+  if answered == asked then return false end
+
+  table.insert(lines, 1, t(i18n, "inputs_in_use",
+    "Setting this up replaces these inputs, and other channels' mixer lines use them:"))
+  lines[#lines + 1] = t(i18n, "inputs_in_use_ask", "Those channels then follow the new input. Continue anyway?")
+
+  local function decline(notice)
+    w.data[noticeKey] = notice
+    w.rebuild()
+  end
+  -- An answer given inside `show` itself is acted on only after this press has called `done`.
+  local pressing, confirmedNow = true, false
+  local function confirm()
+    w.data[flag] = asked
+    w.advance()
+  end
+
+  if ConfirmDialog == nil then ConfirmDialog = loadModule("ui/confirm_dialog.lua") or false end
+  local shown = false
+  if Common and ConfirmDialog and type(ConfirmDialog.show) == "function" then
+    shown = ConfirmDialog.show({
+      title = Common.t(i18n, "diagnostics_elrs_link", "confirm_title", "Confirm"),
+      message = table.concat(lines, "\n"),
+      onConfirm = function()
+        if pressing then confirmedNow = true else confirm() end
+      end,
+      onCancel = function()
+        decline(Common.t(i18n, "diagnostics_elrs_link", "confirm_cancelled", "Nothing was written"))
+      end
+    })
+  end
+  pressing = false
+  if not shown then
+    decline(Common and Common.t(i18n, "diagnostics_elrs_link", "confirm_no_dialog",
+      "This radio cannot show the confirmation.") or "This radio cannot show the confirmation.")
+  end
+  done(false)
+  if confirmedNow then confirm() end
+  return true
+end
+
 local procs = {}
 
 local SW_SWITCH = 1
@@ -556,6 +632,8 @@ procs[#procs + 1] = {
     end
     w.data.sticks = rows
     w.data.sticksError = nil
+    w.data.sticksNotice = nil
+    w.data.sticksConfirmed = nil
 
     local axes = {}
     for _, entry in ipairs(w.radio.STICK_INPUTS) do
@@ -597,12 +675,23 @@ procs[#procs + 1] = {
             value, marker)
         end
 
-        if w.data.sticksError then
+        if w.data.sticksNotice then
+          w.paragraph(children, area.x, y + 6, area.w, tostring(w.data.sticksNotice))
+        elseif w.data.sticksError then
           w.paragraph(children, area.x, y + 6, area.w,
             t(i18n, "write_failed", "The write did not complete.") .. " " .. tostring(w.data.sticksError))
         end
       end,
       advance = function(w, done)
+        w.data.sticksNotice = nil
+        -- Asked before anything is written, the trims included, so a no writes nothing at all.
+        -- The same question and the same shape as the Write step's.
+        local entries = {}
+        for _, info in ipairs(w.data.sticks or {}) do
+          if not info.ok then entries[#entries + 1] = info.entry end
+        end
+        if askInputsInUse(w, entries, "sticksConfirmed", "sticksNotice", done) then return end
+
         -- The trims of every flight mode, and they are settled here because they belong to the
         -- sticks rather than to a channel: a trim moves the neutral the flight controller was
         -- calibrated against, whichever stick it sits under.
@@ -763,17 +852,39 @@ local function boxIdFor(w, name)
   return nil
 end
 
-local function modeRangeFor(w, boxId, aux)
+-- Whether a usable range sits in the window this assistant writes. The board stores the window in
+-- 5 us steps and 1700 / 2100 are whole steps, so a range written here reads back exactly.
+local function inConditionWindow(w, range)
+  local window = w.radio.CONDITION_WINDOW
+  return window ~= nil and tonumber(range.range.start) == window.start
+    and tonumber(range.range["end"]) == window["end"]
+end
+
+-- `foreignOnly` asks for a range of this box on this slot in any OTHER window than the one this
+-- assistant writes. The plan takes that one first, so the write moves a range the board acts on
+-- at the wrong switch position instead of adding a second range beside it.
+local function modeRangeFor(w, boxId, aux, foreignOnly)
   local ranges = w.data.modeRanges
   if type(ranges) ~= "table" or boxId == nil then return nil end
   for index, range in ipairs(ranges) do
     if tonumber(range.id) == boxId and tonumber(range.auxChannelIndex) == aux then
       local from = range.range and tonumber(range.range.start)
       local to = range.range and tonumber(range.range["end"])
-      if from ~= nil and to ~= nil and from < to then return index, range end
+      if from ~= nil and to ~= nil and from < to
+         and not (foreignOnly and inConditionWindow(w, range)) then
+        return index, range
+      end
     end
   end
   return nil
+end
+
+-- Done is a range in the window this assistant writes, and none in another window. The window,
+-- not the presence of a range, decides which switch position the board acts on: a range at the
+-- other end of the travel is a channel that arms at the position the pilot did not name.
+local function conditionRangeDone(w, boxId, aux)
+  if modeRangeFor(w, boxId, aux) == nil then return false end
+  return modeRangeFor(w, boxId, aux, true) == nil
 end
 
 -- `taken` carries the slots this PLAN has already promised to another box. The whole plan is
@@ -784,7 +895,9 @@ end
 local function freeModeSlot(w, boxId, aux, taken)
   local ranges = w.data.modeRanges
   if type(ranges) ~= "table" then return nil end
-  local index = modeRangeFor(w, boxId, aux)
+  local index = modeRangeFor(w, boxId, aux, true)
+  if index and not (taken and taken[index]) then return index end
+  index = modeRangeFor(w, boxId, aux)
   if index and not (taken and taken[index]) then return index end
   for i, range in ipairs(ranges) do
     if not (taken and taken[i]) then
@@ -877,7 +990,7 @@ local function makeChannelProcedure(channel, order)
       if aux == nil then return false end
       local boxId = boxIdFor(w, role.box)
       if boxId == nil then return false end
-      return modeRangeFor(w, boxId, aux) ~= nil
+      return conditionRangeDone(w, boxId, aux)
     end
 
     if role and role.kind == "adjustment" then
@@ -886,8 +999,32 @@ local function makeChannelProcedure(channel, order)
       local found = w.data.adjustments
       if found == "unavailable" then return false end
       if type(found) ~= "table" then return nil end
+      -- A slot carrying the function is done only where it is the range this assistant writes:
+      -- read from this channel's aux slot, over the channel's travel, onto profiles min..max. A
+      -- profile function on another channel selects the profile from a switch the pilot did not
+      -- name here.
+      local aux = w.msp.wireChannelToAux(channel, w.data.rxMap)
+      local travel = w.radio.TRAVEL
       for _, fn in ipairs(role.functions) do
-        if found[fn] == nil then return false end
+        local hit = found[fn]
+        -- A slot whose reply was lost may hold this function: not known, rather than missing.
+        if hit == nil then
+          if type(found.lost) == "table" and #found.lost > 0 then return nil end
+          return false
+        end
+        local record = hit.record or {}
+        local range = record.adjRange1 or {}
+        if aux == nil or tonumber(record.adjChannel) ~= aux then return false end
+        if tonumber(record.adjMin) ~= role.min or tonumber(record.adjMax) ~= role.max then
+          return false
+        end
+        -- Within one 5 us step: the write stores the travel in steps, and 988 / 2012 are not
+        -- whole steps.
+        if travel == nil or tonumber(range.start) == nil or tonumber(range["end"]) == nil
+           or math.abs(tonumber(range.start) - travel.start) >= 5
+           or math.abs(tonumber(range["end"]) - travel["end"]) >= 5 then
+          return false
+        end
       end
       return true
     end
@@ -989,6 +1126,12 @@ local function makeChannelProcedure(channel, order)
     end
 
     local role = entry and w.radio.firstRole(entry) or nil
+    -- A table with slots that never answered is read again on the next visit, whole: what the
+    -- answered slots held may have changed since as well.
+    if role and role.kind == "adjustment" and type(data.adjustments) == "table"
+       and type(data.adjustments.lost) == "table" and #data.adjustments.lost > 0 then
+      data.adjustments = nil
+    end
     if role and role.kind == "adjustment" and data.adjustments == nil then
       -- The single-slot accessor arrived with API 12.09. Below it the command does not
       -- exist, and asking anyway does not fail loudly -- it stalls the queue behind a
@@ -1020,6 +1163,12 @@ local function makeChannelProcedure(channel, order)
             -- somebody's own adjustment.
             found.free = found.free or {}
             found.free[#found.free + 1] = index
+          else
+            -- No reply is neither used nor free. The slot may hold one of the profile functions,
+            -- and a plan that gave that function a free slot would leave the board with two
+            -- ranges for it. Kept as LOST, which blocks the row until the slot has been read.
+            found.lost = found.lost or {}
+            found.lost[#found.lost + 1] = index
           end
           readNext()
         end)
@@ -1407,10 +1556,15 @@ local function plannedActions(w)
             -- slot has to do. The list is built by the enumeration, which walks
             -- `1..ADJ_SLOT_COUNT`, so it can never name a slot past the end of the table.
             local free = type(found.free) == "table" and found.free or nil
+            local lost = type(found.lost) == "table" and #found.lost > 0
             for _, fn in ipairs(role.functions) do
               local hit = found[fn]
               if hit then
                 action.slots[fn] = hit.slot
+              elseif lost then
+                -- The function may sit in a slot that did not answer. A free slot given to it
+                -- would be its second range, so the row waits until every slot has been read.
+                action.unread = true
               elseif free and free[nextFreeAdj] then
                 action.slots[fn] = free[nextFreeAdj]
                 nextFreeAdj = nextFreeAdj + 1
@@ -1431,6 +1585,7 @@ local function actionBlocked(action)
   -- No switch, nothing to write. This is the case that used to be absent from the list rather
   -- than blocked in it.
   if action.swsrc == nil or action.swsrc == 0 then return true end
+  if action.unread then return true end
   -- The windows this assistant writes are absolute microseconds, so a channel whose output
   -- stage cannot produce them is refused rather than written with a window it will never
   -- reach. `nil` is a model that could not be read and is not a refusal.
@@ -1513,6 +1668,8 @@ procs[#procs + 1] = {
     w.data.actions = plannedActions(w)
     w.data.writeError = nil
     w.data.planRefusal = nil
+    w.data.planNotice = nil
+    w.data.inputsConfirmed = nil
   end,
   screens = {
     {
@@ -1555,7 +1712,18 @@ procs[#procs + 1] = {
             target, marker)
         end
 
-        if w.data.planRefusal == "reading" then
+        for _, action in ipairs(w.data.actions or {}) do
+          if action.unread then
+            y = y + 6 + w.paragraph(children, area.x, y + 6, area.w,
+              t(i18n, "plan_adjust_unread",
+                "Some adjustment slots did not answer, so the profile channel waits. Open its step again to read them."))
+            break
+          end
+        end
+
+        if w.data.planNotice then
+          w.paragraph(children, area.x, y + 6, area.w, tostring(w.data.planNotice))
+        elseif w.data.planRefusal == "reading" then
           w.paragraph(children, area.x, y + 6, area.w,
             t(i18n, "plan_still_reading",
               "Nothing was written: the flight controller is still being read. Wait until no row says blocked, then press Write again."))
@@ -1572,6 +1740,7 @@ procs[#procs + 1] = {
         local actions = w.data.actions or {}
         w.data.writeError = nil
         w.data.planRefusal = nil
+        w.data.planNotice = nil
 
         -- Nothing writable means nothing to write. Committing anyway would send a lone
         -- persist for a change that was never made, and a failure of it would be reported
@@ -1593,6 +1762,17 @@ procs[#procs + 1] = {
           done(false)
           return
         end
+
+        -- Asked before anything is written, and the press ends here either way: a yes presses
+        -- Write again with the answer in hand, a no stays on this screen and says nothing was
+        -- written.
+        local entries = {}
+        for _, action in ipairs(actions) do
+          if not actionBlocked(action) and action.entry.input ~= nil then
+            entries[#entries + 1] = action.entry
+          end
+        end
+        if askInputsInUse(w, entries, "inputsConfirmed", "planNotice", done) then return end
 
         w.setBusy(t(w.i18n, "writing_title", "Writing"), t(w.i18n, "writing_message", "Writing the model and the flight controller"))
         for _, action in ipairs(actions) do
@@ -1675,7 +1855,14 @@ procs[#procs + 1] = {
             return
           end
           -- What was just written is now what the next derivation must see, so the board is asked
-          -- again rather than the screen assuming.
+          -- again rather than the screen assuming. The adjustment table is 42 reads long, so it is
+          -- dropped rather than read here: the Profile channel's criterion is unknown until its step
+          -- reads it again, instead of judging the slots it moved by the records from before.
+          for _, action in ipairs(actions) do
+            if not actionBlocked(action) and action.role.kind == "adjustment" then
+              w.data.adjustments = nil
+            end
+          end
           w.msp.read("mode_ranges", function(parsed)
             w.data.modeRanges = parsed and parsed.mode_ranges or w.data.modeRanges
             done(true)
@@ -1951,15 +2138,9 @@ end
 --
 -- The two pickers are not behind it. There the value is the pilot's own pick, so the pick is the
 -- answer.
-local ConfirmDialog = nil
 local Armed = nil
 
-local function askThenSync(w, i18n, mode, boardText, moduleText)
-  local task = linkTask(w)
-  -- Without the shared text helper there is no question to put up, and no answer to act on.
-  if task == nil or Common == nil then return end
-
-  if ConfirmDialog == nil then ConfirmDialog = loadModule("ui/confirm_dialog.lua") or false end
+local function ensureArmed()
   if Armed == nil then
     if _G.rfsuite and _G.rfsuite.require then
       Armed = _G.rfsuite.require("lib/armed.lua") or false
@@ -1967,6 +2148,27 @@ local function askThenSync(w, i18n, mode, boardText, moduleText)
       Armed = loadModule("lib/armed.lua") or false
     end
   end
+  return Armed
+end
+
+-- Nothing on this step runs while the model is armed -- the tool does not wake a page then -- so
+-- Read is refused like Probe on the ELRS Link page, and the row says why for as long as that
+-- lasts. Read from the predicate on every build, never kept, so nothing stands after the disarm.
+-- nil when disarmed, "armed", or "unknown" when the predicate itself is missing.
+local function linkArmedState()
+  local armed = ensureArmed()
+  if type(armed) ~= "table" or type(armed.isArmed) ~= "function" then return "unknown" end
+  if armed.isArmed() == true then return "armed" end
+  return nil
+end
+
+local function askThenSync(w, i18n, mode, boardText, moduleText)
+  local task = linkTask(w)
+  -- Without the shared text helper there is no question to put up, and no answer to act on.
+  if task == nil or Common == nil then return end
+
+  if ConfirmDialog == nil then ConfirmDialog = loadModule("ui/confirm_dialog.lua") or false end
+  ensureArmed()
 
   local lines = {}
   if mode == task.MODE_ROTORFLIGHT_TO_ELRS then
@@ -2202,12 +2404,22 @@ procs[#procs + 1] = {
         local statusKey, statusDefault = task.getStatus()
         local statusText = tLink(i18n, statusKey, statusDefault)
         if w.data.linkNotice ~= nil and not task.isRunning() then statusText = w.data.linkNotice end
+        local armedState = Common and linkArmedState() or nil
+        if armedState == "armed" then
+          statusText = Common.t(i18n, "diagnostics_elrs_link", "status_unavailable_armed", "Unavailable while armed")
+        elseif armedState == "unknown" then
+          statusText = Common.t(i18n, "diagnostics_elrs_link", "status_arming_unknown", "Arming state unknown")
+        end
         y = y + w.findingRow(children, area.x, y, area.w,
           t(i18n, "link_status", "Probe"), statusText,
           {
             { text = t(i18n, "link_probe", "Read"),
               active = function() return not task.isRunning() end,
               press = function()
+                if linkArmedState() ~= nil then
+                  w.rebuild()
+                  return
+                end
                 w.data.linkNotice = nil
                 w.data.linkConfigAsked = nil
                 readTelemetryConfig(w)

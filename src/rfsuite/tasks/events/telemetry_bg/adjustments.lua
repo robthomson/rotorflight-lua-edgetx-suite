@@ -48,10 +48,11 @@ local SETTLE_SECONDS = 1.0
 -- tree are used: an adjustment whose name cannot be spoken with them has NO entry, and the
 -- teller then announces its value alone rather than announcing something else.
 --
--- Ids 1-4 are the profile switches and 82 is the battery profile. They are deliberately absent:
--- the suite already announces a PID or rate profile change through its own `pid_profile` /
--- `rate_profile` settings and a battery profile change through `battery_profile`, and a second
--- voice for the same event is worse than none.
+-- Ids 1-4 are the profile switches and 82 is the battery profile. They have no entry here and
+-- are not announced at all, value included (SPOKEN_ELSEWHERE below): the suite already announces
+-- a PID or rate profile change through its own `pid_profile` / `rate_profile` settings and a
+-- battery profile change through `battery_profile`, and a second voice for the same event is
+-- worse than none.
 local ADJUSTMENTS = {
   [5]  = { "pitch", "rate" },
   [6]  = { "roll", "rate" },
@@ -146,9 +147,15 @@ local ADJUSTMENTS = {
   [81] = { "gov", "yaw", "ff" },
 }
 
+-- The firmware leaves 1-4 out of its report (`updateAdjustmentData` in `fc/rc_adjustments.c`),
+-- but it does report 82, so without this the battery profile would be spoken twice: the value
+-- here and the pack's capacity by `lib/audio.lua`.
+local SPOKEN_ELSEWHERE = { [1] = true, [2] = true, [3] = true, [4] = true, [82] = true }
+
 local state = {
   functionId = nil,
   value = nil,
+  idleSeen = false,
   functionChanged = false,
   valueChanged = false,
   changedAt = nil,
@@ -191,16 +198,19 @@ local function ensureAudio()
 end
 
 local function announce()
+  if SPOKEN_ELSEWHERE[state.functionId] then return end
+  local audio = ensureAudio()
   local words = state.functionChanged and ADJUSTMENTS[state.functionId] or nil
-  if words then
-    local audio = ensureAudio()
-    if audio then
-      for i = 1, #words do
-        audio.playEventFile("adj/" .. words[i] .. ".wav")
-      end
+  if words and audio then
+    for i = 1, #words do
+      audio.playEventFile("adj/" .. words[i] .. ".wav")
     end
   end
-  if type(playNumber) == "function" then
+  -- Through the audio module when it is reachable, so the value is spoken at the same level as
+  -- the words before it.
+  if audio and type(audio.playNumber) == "function" then
+    audio.playNumber(state.value or 0, 0)
+  elseif type(playNumber) == "function" then
     pcall(playNumber, state.value or 0, 0, 0)
   end
 end
@@ -215,12 +225,21 @@ function M.wakeup()
   -- Nothing is being adjusted. Do not announce, and do not remember it as a change either --
   -- the flight controller reports 0 between adjustments, and announcing that would put a
   -- spurious "0" after every one of them.
-  if functionId == 0 then return end
+  if functionId == 0 then
+    state.idleSeen = true
+    return
+  end
 
   local now = nowSeconds()
 
-  if state.functionId == nil then
-    -- The first reading is the state we join, not an adjustment the pilot just made.
+  -- The firmware reports an adjustment for 3 s after it was made, and 0 otherwise. A first
+  -- reading that is not 0 is therefore an adjustment made just before this teller started or
+  -- was reset, often one another Lua state's teller has already announced (the tool opening,
+  -- the background function script starting, or the widget taking over from it) -- and it is
+  -- joined rather than announced. Once a 0 has been read, nothing was being adjusted, so the
+  -- next report is the pilot's: in the widget and the tool that is the first adjustment after
+  -- every connect, since their teller is reset at each disconnect.
+  if state.functionId == nil and not state.idleSeen then
     state.functionId, state.value = functionId, value
     return
   end
@@ -249,6 +268,7 @@ end
 function M.reset()
   state.functionId = nil
   state.value = nil
+  state.idleSeen = false
   state.functionChanged = false
   state.valueChanged = false
   state.changedAt = nil

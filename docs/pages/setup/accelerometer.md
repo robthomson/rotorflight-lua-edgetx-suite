@@ -23,7 +23,7 @@ arming status and accelerometer presence before sending the start command.
 | --- | --- |
 | Roll | Roll trim, from -300 to 300 in the page's displayed degree units. |
 | Pitch | Pitch trim, from -300 to 300 in the page's displayed degree units. |
-| Save | Writes the edited trims to EEPROM. |
+| Save | Writes the edited trims to EEPROM. Held until the page has read the trims from the flight controller on this visit. |
 | Reload | Reads the trims from the flight controller again. |
 | Star / Calibrate | Starts accelerometer calibration after confirmation. |
 
@@ -68,7 +68,7 @@ started on the controller.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 - [Issue 302](https://github.com/rotorflight/rotorflight-lua-edgetx-suite/issues/302)
 
 *Documented against RFSuite 0.1.7.*

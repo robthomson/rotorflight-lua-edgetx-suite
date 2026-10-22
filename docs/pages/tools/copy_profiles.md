@@ -26,8 +26,13 @@ Greyed out until the flight controller answers. Read-only while the model is arm
 
 Both lists offer the profiles the flight controller reports it has, and the two kinds are counted
 separately: a board built with 256 kB of flash has three PID profiles and six rate profiles, and a
-smaller one has two and three. A profile the board does not have is not offered, because it would
-be refused there without anything being said.
+smaller one has two and three. A profile the board does not have is not offered, because the board
+ignores a copy onto it and still answers as if it had been made. Until the flight controller's
+status has been read, both lists offer six and SAVE is held: pressed before that, the save notice
+asks for the read to finish, and RELOAD asks the board again. A choice beyond the board's profiles
+-- made before its status arrived, or carried over from the other type -- is not moved to another
+profile and is not sent: the list shows it as *Unknown (n)*, and the save notice asks to check the
+choice and save again.
 
 ## Notes
 
@@ -48,6 +53,6 @@ onto itself that is asked for anyway is refused and says so.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

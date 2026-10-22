@@ -42,8 +42,8 @@ The suggestions follow these rules:
 
 - **Turns faster or slower than asked** (more than 15% off): change FF and the rates by the same amount in
   opposite directions, so the stick feel stays the same but the heli flies the rate you ask for. One step
-  changes FF by at most 20%. With Actual, Quick and Rotorflight rates the page gives the exact rate values;
-  with the other rate types it gives a percentage. An axis with FF set to 0 (often the tail) gets no FF advice.
+  changes FF by at most 20%. With Actual, Quick and Rotorflight rates the page gives the exact rate values,
+  never beyond what the *Rates* page takes for that column; with the other rate types it gives a percentage. An axis with FF set to 0 (often the tail) gets no FF advice.
 - **Full stick asks for more rate than the heli reaches** (roll and pitch), with the cyclic at its limit: lower
   the rates to what the heli reaches.
 - **Stops bounce back 12% or more**: if the I-term pushes back, lower *Advanced > PID Controller > Cut-off point*
@@ -55,12 +55,15 @@ The suggestions follow these rules:
 - The names in a suggestion are the ones the target page shows. Which rate columns are named depends on the
   rate type: *Center Sens* and *Max Rate* for Actual, *RC Rate* and *Max Rate* for Quick, *Rate* for Rotorflight.
 - With polar cyclic rates (*Advanced* → *Rates (Advanced)* → *Cyclic Behaviour*), the *Rates* page shows one
-  *Cyclic* row that sets Roll and Pitch together, so a suggestion naming Roll or Pitch is made on that row and
-  changes both axes.
+  *Cyclic* row, which edits the Pitch rates. While polar is on, the flight controller applies that one curve
+  to the whole cyclic stick, roll included, and a rate change on that row changes both axes in flight. The
+  Roll rates are not changed by the row; they are kept as they were and apply again once polar is switched
+  off. This page does not take polar into account: a suggestion for Roll still names the Roll rates and works
+  its values out from them, although they are not in use while polar is on.
 
 ## Related
 
 - [Rates](rates.md)
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

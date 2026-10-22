@@ -23,10 +23,10 @@ Read-only while the model is armed.
 | Selected Battery | Which of the flight controller's six battery profiles is active. Switching it here switches it on the board. |
 | Battery 1 … Battery 6 | The capacity stored in each profile, 0 to 40000 mAh. All six are written on every save, so a capacity can be edited without selecting its profile. |
 | Edit Battery | Shown only on firmware that keeps the cell count and cell voltages per battery profile: which profile the five rows below show and edit. It opens on the active profile and is never sent to the flight controller, so editing another profile does not make it active. |
-| Max cell voltage | The top of a cell's voltage range. The flight controller uses it to work out the cell count when Cell count is 0, and to scale the charge level when no capacity is set. 2.50 to 5.00 V, default 4.20. |
-| Full cell voltage | The nominal voltage of a fully charged cell, which is what a full pack is measured against. 2.50 to 5.00 V, default 4.10. |
-| Warn cell voltage | The per-cell voltage at which the low-voltage alarm starts. 2.50 to 5.00 V, default 3.50. |
-| Min cell voltage | The minimum per-cell voltage, below which the low-voltage alarm is triggered. 2.50 to 5.00 V, default 3.30. |
+| Max cell voltage | The top of a cell's voltage range. The flight controller uses it to work out the cell count when Cell count is 0, and to scale the charge level when no capacity is set. 1.00 to 5.00 V, default 4.20. |
+| Full cell voltage | The nominal voltage of a fully charged cell, which is what a full pack is measured against. 1.00 to 5.00 V, default 4.10. |
+| Warn cell voltage | The per-cell voltage at which the low-voltage alarm starts. 1.00 to 5.00 V, default 3.50. |
+| Min cell voltage | The minimum per-cell voltage, below which the low-voltage alarm is triggered. 1.00 to 5.00 V, default 3.30. |
 | Cell count | Cells in the pack, 0 to 24. 0 lets the flight controller work it out from the pack voltage. |
 | Consumption reserve | How much of the capacity is held back, so that the fuel reading reaches zero with that much of the pack left. 15 to 60 %, default 35. |
 
@@ -46,7 +46,11 @@ values for every profile.
   leaves the board's profile alone rather than switching it to the one on screen. Selecting a
   profile on this page always sends it.
 - Saving writes the whole battery configuration to the flight controller and commits it to the
-  board's own storage.
+  board's own storage. A cell voltage that was not edited goes back exactly as the flight
+  controller reported it. The page also keeps this model's copy of its settings on the radio; where
+  that copy cannot be written, the notice says the values went to the flight controller, that the
+  model's settings were not saved, and why — for example *the settings file could not be written
+  to the SD card*.
 - **Per profile, each cell voltage stays between its neighbours.** On firmware with per-profile
   cells the flight controller keeps every profile ordered — Min below Max, and Min ≤ Warn ≤ Full ≤
   Max — and changes a profile that is out of that order itself when it stores it. So a voltage
@@ -61,7 +65,7 @@ values for every profile.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/) — the battery profiles and the
+- [Rotorflight documentation](https://doc.rotorflight.org/) — the battery profiles and the
   voltage levels themselves are the flight controller's
 
 *Documented against RFSuite 0.1.7.*

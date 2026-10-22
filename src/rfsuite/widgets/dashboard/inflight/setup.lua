@@ -1108,7 +1108,8 @@ end
 
 -- How far up the channel list the search for a free global variable looks. EdgeTX carries 32
 -- output channels; walking all of them is a one-off cost of one getMixesCount per channel plus
--- one getMix per line, paid when a page is opened and never in a widget pass.
+-- one getMix per line, paid when a page is opened -- and, where that page is the tool opened from
+-- the dashboard, a slice at a time (M.gvarWalkStep), never whole in one widget pass.
 local MIX_SCAN_CHANNELS = 32
 
 -- And how many INPUTS. EdgeTX carries 32 of those as well, each with its own lines, and an input
@@ -1133,8 +1134,36 @@ local SOURCE_REF_MIN = MIX_WEIGHT_GVAR_BASE
 -- Answers the list of free numbers, in ascending order, and how many lines it had to read to say
 -- so -- which is the figure a probe bounds.
 function M.freeGvars(radio, wanted)
-  if type(radio) ~= "table" then return nil, 0 end
-  if type(radio.mixesCount) ~= "function" or type(radio.mix) ~= "function" then return nil, 0 end
+  local walk = M.newGvarWalk(radio)
+  if walk == nil then return nil, 0 end
+  M.gvarWalkStep(walk, nil)
+
+  local used = walk.used
+  local free = {}
+  for n = 1, M.GVAR_MAX_INDEX do
+    if used[n] == nil then
+      free[#free + 1] = n
+      if wanted ~= nil and #free >= wanted then break end
+    end
+  end
+  return free, walk.lines, used
+end
+
+-- How many firmware reads -- a line count or a line -- one slice of the walk below may take.
+--
+-- The walk is paid where a page is opened, and in the standalone tool it runs whole. The tool opened
+-- from the dashboard runs inside the widget's call instead, under the instruction limit of a widget
+-- pass, and there a model with lines on every channel and every input does not fit beside the page's
+-- own build. Thirty-two reads are a small part of one pass.
+M.GVAR_WALK_SLICE = 32
+
+--- The walk behind M.freeGvars, prepared to run a slice at a time.
+--
+-- Answers nil where this radio does not offer the mixer readers, which M.freeGvars has always
+-- reported as "no walk".
+function M.newGvarWalk(radio)
+  if type(radio) ~= "table" then return nil end
+  if type(radio.mixesCount) ~= "function" or type(radio.mix) ~= "function" then return nil end
 
   -- The source index of every variable, resolved once: getSourceIndex is a name lookup, and doing
   -- it per mixer line would make the walk cost the layout's length times the variable count.
@@ -1144,60 +1173,111 @@ function M.freeGvars(radio, wanted)
     if sourceIndex ~= nil then indexOfGvar[SOURCE_REF_MIN + sourceIndex] = n end
   end
 
-  local used = {}
-  local lines = 0
+  return {
+    radio = radio,
+    indexOfGvar = indexOfGvar,
+    -- variable number -> the first line found referring to it, as "CH3" or "IN2".
+    used = {},
+    -- How many lines the walk has read, which is the figure a probe bounds.
+    lines = 0,
+    -- Where the walk stands: the mixer channels first, then the inputs, then nothing. `count` is
+    -- the line count of the channel or input at `at`, read once when the walk reaches it.
+    half = "mix",
+    at = 1,
+    count = nil,
+    line0 = 0,
+    where = nil,
+    done = false
+  }
+end
 
-  --- Both magnitudes of one line, read for a source reference. A negated reference is spelled with
-  -- the sign on the whole number rather than on the index, so both signs are looked up.
-  --
-  -- `where` names the line the reference was found on, and it is the whole point of the walk now
-  -- that the two variables are defaulted rather than proposed: a warning that says a variable is
-  -- taken and not where would send the pilot through thirty-two channels to find out.
-  local function readLine(line, where)
-    if type(line) ~= "table" then return end
-    local weight = tonumber(line.weight) or 0
-    local offset = tonumber(line.offset) or 0
-    local byWeight = indexOfGvar[weight] or indexOfGvar[-weight]
-    local byOffset = indexOfGvar[offset] or indexOfGvar[-offset]
-    if byWeight ~= nil and used[byWeight] == nil then used[byWeight] = where end
-    if byOffset ~= nil and used[byOffset] == nil then used[byOffset] = where end
+--- Both magnitudes of one line, read for a source reference. A negated reference is spelled with
+-- the sign on the whole number rather than on the index, so both signs are looked up.
+--
+-- `where` names the line the reference was found on, and it is the whole point of the walk now
+-- that the two variables are defaulted rather than proposed: a warning that says a variable is
+-- taken and not where would send the pilot through thirty-two channels to find out.
+local function readWalkLine(indexOfGvar, used, line, where)
+  if type(line) ~= "table" then return end
+  local weight = tonumber(line.weight) or 0
+  local offset = tonumber(line.offset) or 0
+  local byWeight = indexOfGvar[weight] or indexOfGvar[-weight]
+  local byOffset = indexOfGvar[offset] or indexOfGvar[-offset]
+  if byWeight ~= nil and used[byWeight] == nil then used[byWeight] = where end
+  if byOffset ~= nil and used[byOffset] == nil then used[byOffset] = where end
+end
+
+--- The half after this one, or nil when the walk has none left.
+--
+-- The inputs, on the same terms as the mixer. An input line encodes a source in its weight and its
+-- offset exactly as a mixer line does, so a variable scaling a rate or an expo is spoken for -- and a
+-- proposal that overlooked it would hand the overlay a variable it pulses several times a second
+-- while a pilot is tuning, moving a control surface for a reason nobody could connect to it. A
+-- firmware without the input readers answers nil and this half is simply not walked.
+local function nextHalf(radio, half)
+  if half == "mix" and type(radio.inputsCount) == "function" and type(radio.input) == "function" then
+    return "input"
   end
+  return nil
+end
 
-  for channel = 1, MIX_SCAN_CHANNELS do
-    local count = radio.mixesCount(channel)
-    if count == nil then break end
-    local where = "CH" .. tostring(channel)
-    for line0 = 0, count - 1 do
-      lines = lines + 1
-      readLine(radio.mix(channel, line0), where)
-    end
-  end
-
-  -- The inputs, on the same terms. An input line encodes a source in its weight and its offset
-  -- exactly as a mixer line does, so a variable scaling a rate or an expo is spoken for -- and a
-  -- proposal that overlooked it would hand the overlay a variable it pulses several times a second
-  -- while a pilot is tuning, moving a control surface for a reason nobody could connect to it.
-  -- A firmware without the input readers answers nil and this half is simply not walked.
-  if type(radio.inputsCount) == "function" and type(radio.input) == "function" then
-    for input = 1, INPUT_SCAN_COUNT do
-      local count = radio.inputsCount(input - 1)
-      if count == nil then break end
-      local where = "IN" .. tostring(input)
-      for line0 = 0, count - 1 do
-        lines = lines + 1
-        readLine(radio.input(input - 1, line0), where)
+--- One slice of the walk: at most `budget` firmware reads, or the rest of it when `budget` is nil.
+-- Answers true once every channel and every input has been read; the findings are on the walk.
+--
+-- A channel or an input whose line count reads nil ends its half, as the walk always has: the
+-- firmware answers nil past the last one it carries.
+--
+-- The standalone tool runs this whole inside the page's build, so it is written as the two loops
+-- it replaced: where the walk stands is held in locals and put back on the walk only when a slice
+-- stops. A walk that went back through its own table for every read cost that build several
+-- thousand instructions more on a model with lines on every channel.
+function M.gvarWalkStep(walk, budget)
+  if type(walk) ~= "table" then return true end
+  if walk.done then return true end
+  local radio = walk.radio
+  local indexOfGvar, used = walk.indexOfGvar, walk.used
+  local half, at, count, line0, where, lines = walk.half, walk.at, walk.count, walk.line0, walk.where, walk.lines
+  -- Reads this slice may still take.
+  local left = budget or math.huge
+  local stopped = false
+  while half ~= nil and not stopped do
+    local mixHalf = half == "mix"
+    local limit = mixHalf and MIX_SCAN_CHANNELS or INPUT_SCAN_COUNT
+    -- A mixer channel is numbered from 1, an input from 0.
+    local countOf = mixHalf and radio.mixesCount or radio.inputsCount
+    local lineOf = mixHalf and radio.mix or radio.input
+    local shift = mixHalf and 0 or -1
+    while at <= limit do
+      if count == nil then
+        if left <= 0 then stopped = true break end
+        left = left - 1
+        count = countOf(at + shift)
+        -- Past the last one the firmware carries: this half is over.
+        if count == nil then break end
+        line0 = 0
+        where = (mixHalf and "CH" or "IN") .. tostring(at)
       end
+      if line0 < count then
+        if left <= 0 then stopped = true break end
+        local last = count - 1
+        if line0 + left - 1 < last then last = line0 + left - 1 end
+        for l = line0, last do
+          readWalkLine(indexOfGvar, used, lineOf(at + shift, l), where)
+        end
+        local read = last - line0 + 1
+        lines, left, line0 = lines + read, left - read, last + 1
+      end
+      -- Moving on reads nothing, so it is not a read of the budget.
+      if line0 >= count then at, count = at + 1, nil end
+    end
+    if not stopped then
+      half, at, count = nextHalf(radio, half), 1, nil
     end
   end
-
-  local free = {}
-  for n = 1, M.GVAR_MAX_INDEX do
-    if used[n] == nil then
-      free[#free + 1] = n
-      if wanted ~= nil and #free >= wanted then break end
-    end
-  end
-  return free, lines, used
+  walk.half, walk.at, walk.count, walk.line0, walk.where, walk.lines = half, at, count, line0, where, lines
+  if stopped then return false end
+  walk.done = true
+  return true
 end
 
 --- Which of the two configured variables this model already refers to, and on which line.
@@ -1212,7 +1292,12 @@ end
 function M.gvarConflicts(radio, settings)
   if type(radio) ~= "table" or type(settings) ~= "table" then return nil end
   local _, _, used = M.freeGvars(radio, nil)
-  if type(used) ~= "table" then return nil end
+  return M.conflictsFromUsed(used, settings)
+end
+
+--- The same answer from a walk that has already been made, in one slice or in several.
+function M.conflictsFromUsed(used, settings)
+  if type(used) ~= "table" or type(settings) ~= "table" then return nil end
   local out = {}
   local seen = {}
   local wanted = { settings.value_gvar or 0, settings.bank_gvar or 0 }
@@ -1261,17 +1346,42 @@ function M.gvarNameClashes(radio, settings)
   if type(radio.globalVariableDetails) ~= "function" then return nil end
   local bank = settings.bank_gvar or 0
   local value = settings.value_gvar or 0
-  local out = {}
-  local looked = false
+  local names = {}
   for n = 1, M.GVAR_MAX_INDEX do
     if n ~= bank and n ~= value then
       local details = radio.globalVariableDetails(n - 1)
-      if type(details) == "table" then
-        looked = true
-        local name = tostring(details.name or "")
-        if name == GVAR_NAME_VALUE or name == GVAR_NAME_BANK then
-          out[#out + 1] = { index = n, name = name }
-        end
+      if type(details) == "table" then names[n] = tostring(details.name or "") end
+    end
+  end
+  return M.nameClashesFromNames(names, settings)
+end
+
+--- The name of every global variable, by number (nil where the details could not be read), for a
+-- caller that asks the question above again while the pilot changes the two variables: the names
+-- do not depend on which two he picks.
+function M.gvarNames(radio)
+  if type(radio) ~= "table" or type(radio.globalVariableDetails) ~= "function" then return nil end
+  local names = {}
+  for n = 1, M.GVAR_MAX_INDEX do
+    local details = radio.globalVariableDetails(n - 1)
+    if type(details) == "table" then names[n] = tostring(details.name or "") end
+  end
+  return names
+end
+
+--- The answer of gvarNameClashes from names already read (variable number -> name).
+function M.nameClashesFromNames(names, settings)
+  if type(names) ~= "table" or type(settings) ~= "table" then return nil end
+  local bank = settings.bank_gvar or 0
+  local value = settings.value_gvar or 0
+  local out = {}
+  local looked = false
+  for n = 1, M.GVAR_MAX_INDEX do
+    local name = names[n]
+    if n ~= bank and n ~= value and name ~= nil then
+      looked = true
+      if name == GVAR_NAME_VALUE or name == GVAR_NAME_BANK then
+        out[#out + 1] = { index = n, name = name }
       end
     end
   end

@@ -179,8 +179,21 @@ end
 
 local S = sharedState()
 
+--- Does this outcome need no acknowledgement? A save that asked for a restart is a plain success
+-- only once the restart was seen. An answer after the reboot proves only that the board is usable:
+-- a reboot command lost on the link leaves a board that never restarted answering just the same,
+-- and the settings that take effect at boot are then not in effect. Such an outcome stands like a
+-- failure, so that it cannot pass for a finished restart by clearing itself.
+local function clearsItself(result)
+  if type(result) ~= "table" or result.status ~= "done" then return false end
+  return result.reboot ~= true or result.rebootProven == true
+end
+
 local function finish(status, extra)
   if not S.run then return end
+  -- A run whose screen went away before it could be dismissed (dismissWhenStored) ends as a
+  -- dismissed one, a failure before the EEPROM commit included: it is held for its page.
+  if S.run.dismissRequested == true then S.run.dismissed = true end
   local result = {
     status = status,
     saved = S.run.saved == true,
@@ -222,7 +235,7 @@ local function finish(status, extra)
   -- while it stands the tool's run() -- and with it the MSP tick -- does not run. The overlay is
   -- already on screen, already says what the save is doing, and answers touch.
   S.outcome = { status = status, result = result }
-  if status == "done" then
+  if clearsItself(result) then
     S.outcome.clearAt = nowSeconds() + OUTCOME_LINGER_SECONDS
   end
   if type(desc.onDone) == "function" then
@@ -351,6 +364,7 @@ end
 
 local function afterCommit()
   S.run.saved = true
+  if S.run.dismissRequested == true then S.run.dismissed = true end
   if type(S.run.desc.onSaved) == "function" then
     -- Read before the call: the callback runs while S.run is still live and may end the run.
     local pageId = S.run.desc.pageId
@@ -523,8 +537,12 @@ function M.wakeup()
           return
         end
         -- Answered, so the flight controller is usable again. A flag of 0 additionally proves
-        -- the reset really happened; a flag of 1 means it could not be proven from here, which
-        -- is reported rather than treated as a failure.
+        -- the reset really happened; a flag of 1 means it could not be proven from here. That is
+        -- not a failure -- the settings are stored -- and it is not reported as a finished
+        -- restart either: see clearsItself() and the outcome the host draws for it. The error is
+        -- one-sided: a GPS that sets the clock from its own date before this answer, or the connect
+        -- chain re-sending it after a link drop, makes a restarted board read 1 as well, but once
+        -- the pre-flight read 1, only a reset clears the flag.
         S.run.rebootProven = (not S.run.probeDegraded) and value == 0
         startOnconnectWait()
       end)
@@ -592,6 +610,30 @@ function M.dismiss()
   if not S.run or S.run.saved ~= true then return false end
   S.run.dismissed = true
   return true
+end
+
+--- The screen showing a save that holds the page goes away without the press that would dismiss it:
+-- the tool opened from the dashboard closes when fullscreen is left or the model arms, and it cannot
+-- refuse to. Such a run is dismissed as Back dismisses it -- at once if its settings are stored, else
+-- the moment the EEPROM commit is acknowledged -- and one that ends before that is held for its page
+-- all the same, so its outcome is reported where Back's would be: when that page is entered again.
+-- A run that does not hold the page (no restart) is left alone, as Back leaves it.
+function M.dismissWhenStored()
+  if not M.blocksNavigation() then return false end
+  if S.run.saved == true then
+    S.run.dismissed = true
+  else
+    S.run.dismissRequested = true
+  end
+  return true
+end
+
+--- The screen comes back before a dismissal asked for by dismissWhenStored could be applied (the
+-- tool is opened again during the writes or the EEPROM commit): the request is withdrawn, so the
+-- run reports in the notice on that screen, a failure included, instead of being held for its page.
+-- A run that is already dismissed stays dismissed, as after Back.
+function M.reclaim()
+  if S.run and S.run.dismissed ~= true then S.run.dismissRequested = nil end
 end
 
 --- Whoever is on screen renders this; the pipeline draws nothing itself.
@@ -663,7 +705,7 @@ function M.takeResult(pageId)
   local result = entry.result
   if type(result) == "table" then
     S.outcome = { status = result.status, result = result }
-    if result.status == "done" then
+    if clearsItself(result) then
       S.outcome.clearAt = nowSeconds() + OUTCOME_LINGER_SECONDS
     end
   end

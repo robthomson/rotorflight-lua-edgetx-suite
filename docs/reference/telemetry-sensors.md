@@ -25,7 +25,7 @@ repeat it, because a copy would go out of date the first time the flight control
 sensor.
 
 For the meaning of an individual value — what `Vbat` measures, what the governor states are —
-see the [Rotorflight documentation](https://www.rotorflight.org/docs/); the suite does not
+see the [Rotorflight documentation](https://doc.rotorflight.org/); the suite does not
 redefine them.
 
 ## A sensor the suite does not know stops the frame
@@ -66,6 +66,19 @@ cell arrives, so sending just the cell that changed would leave the total behind
 
 A group whose values move in every frame is therefore sent as often as it arrives; the difference
 shows where values hold still, on the bench and while the model stands.
+
+The control, attitude and acceleration groups fill the same sensors as the individual values of
+the same name, at the finer scale the flight controller sends the group in: the control angles
+(`CPtc`, `CRol`, `CYaw`, `CCol`) and the acceleration (`AccX`, `AccY`, `AccZ`) with two decimals,
+the attitude (`Ptch`, `Roll`, `Yaw`) with one. Selected individually, each of these sensors
+carries one decimal fewer.
+
+EdgeTX keeps the decimals a sensor was created with and converts every later value to them,
+dropping the digits it has no room for. So whichever of the two arrives first decides how many
+decimals the sensor shows, and the other is scaled to it; and a model that discovered these
+sensors with an older version of the suite shows the right values with its old decimals (a pitch
+of 12.3 degrees as 12) until the sensors are deleted and discovered again, or their precision is
+set on the sensor's page.
 
 ## The two sensors the suite computes itself
 
@@ -119,13 +132,17 @@ Besides the flight controller's own values, the decoder creates two sensors of i
 `*Cnt` rising is the simplest confirmation that custom telemetry is arriving at all; `*Skp`
 rising alongside it points at the radio link rather than at the flight controller. They are
 ordinary sensors and can be deleted on the radio's own telemetry screen if you do not want the
-rows — nothing in the suite depends on them being visible.
+rows. The *Telemetry Dropouts* announcement reads `*Skp` while it is switched on; nothing else in
+the suite depends on them. When the decoding moves between the background function script, the
+dashboard and the tool, `*Skp` continues from the value on the radio rather than jumping, and the
+dashboard or the tool starts it over at 0 after a lost link (see
+[Audio events](../audio/events.md#telemetry-dropouts)).
 
 ## Related
 
 - [SmartFuel page](../pages/setup/power/smartfuel.md) — where `SmFt` and `SmCp` are configured
 - [Telemetry page](../pages/setup/telemetry.md) — where the sensors are selected
 - [Background decoder](background-decoder.md) — where the decoding runs
-- [Rotorflight documentation](https://www.rotorflight.org/docs/) — what each value means
+- [Rotorflight documentation](https://doc.rotorflight.org/) — what each value means
 
 *Documented against RFSuite 0.1.7.*

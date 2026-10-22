@@ -193,14 +193,51 @@ end
 
 -- A received reply can still be rejected by its parser. Leave the page reloadable, but
 -- never let the defaults left on screen become a write to the flight controller.
+-- `readFailed` stays set until the page starts its next read, so a page can draw
+-- appendReadFailedNotice in place of values the flight controller never sent.
 function M.failPageRead(ui)
   if type(ui.runtime) ~= "table" then return end
   ui.runtime.readComplete = false
+  ui.runtime.readFailed = true
   ui.runtime.readPending = false
   ui.loading = false
   if type(ui.runtime.requestRebuild) == "function" then
     ui.runtime.requestRebuild()
   end
+end
+
+-- What a read-backed page draws instead of its fields once its read has failed: one sentence,
+-- the same on every page. The page's Reload reads again.
+function M.appendReadFailedNotice(children, x, y, w)
+  children[#children + 1] = {
+    type = "label",
+    x = x + 10,
+    y = y,
+    w = w - 20,
+    text = "@i18n(app.read_failed)@",
+    color = COLOR_THEME_PRIMARY1,
+    font = SMLSIZE
+  }
+end
+
+-- The reason a pilot reads after "Save failed" when a settings file could not be written. A store
+-- answers a refused write with a token -- config_store's "io", "write", "delete" or "rename" --
+-- or with the error text io.open gave, which carries the file's path, and the module around it
+-- can answer with a Lua error. None of that is for the screen: it all reads as one sentence.
+-- `modelStore` says the answer is about the model's own file (model_preferences.saveByMcuId),
+-- whose "unavailable" (the store module will not load) and "missing_mcu_id" (no board id to
+-- name the model's file by) have sentences of their own. The raw answer belongs in the log.
+function M.saveFailureReason(i18n, err, modelStore)
+  if modelStore and err == "unavailable" then
+    return i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.model_store_unavailable")
+      or "model settings store not available"
+  end
+  if modelStore and err == "missing_mcu_id" then
+    return i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.model_store_missing")
+      or "Connect the flight controller to save this model's settings"
+  end
+  return i18n and i18n.t and i18n.t("app.pages.settings_dashboard_settings.store_write_failed")
+    or "the settings file could not be written to the SD card"
 end
 
 -- Shared teardown helper for page modules.

@@ -532,6 +532,10 @@ end
 --     suffix="°"
 --     get=function() return number end
 --     set=function(number) end
+--     edited=function() end   called once when the editor closes, after the last `set`; `set`
+--                             runs on every click while it is open, and a rebuild closes it.
+--                             EdgeTX 2.11.5 and 2.12.0 on (EdgeTX pull request #7077); an
+--                             older firmware ignores the key.
 
 function Controls.appendNumberField(children, x, y, w, labelText, opts)
   opts = opts or {}
@@ -607,6 +611,7 @@ function Controls.appendNumberField(children, x, y, w, labelText, opts)
       end
       setter(nextVal)
     end,
+    edited = opts.edited,
     display = function(val)
       local stepIdx = tonumber(val) or 0
       local shown = minVal + (stepIdx * stepVal)

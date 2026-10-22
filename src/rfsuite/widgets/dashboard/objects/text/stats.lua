@@ -68,6 +68,7 @@ function Render.render(nodes, rect, box, state, themeCommon, utils)
   local lastSource = nil
   local lastStattype = nil
   local lastStatInput = nil
+  local lastStatCells = nil
   local cachedText = nil
 
   -- The record key the box's (source, stattype) pair resolves to. A theme may give either as a
@@ -107,12 +108,22 @@ function Render.render(nodes, rect, box, state, themeCommon, utils)
     elseif source == "min_voltage_cell" then
       if minVoltageKey == nil then minVoltageKey = utils.statFields("voltage", "min") end
       local val = utils.statFromRecord(state.flight, minVoltageKey)
-      if source == lastSource and val == lastStatInput and cachedText ~= nil then
+      -- After a landing the minimum is divided by the cell count taken at the disarm, as
+      -- `lastcell` divides the landing voltage: the live count follows whatever pack is plugged
+      -- in after it. In flight, and when the pack read 0 V at the disarm, no count was taken
+      -- and the live one is the flight's.
+      local cells = state.lastFlightEndingCells
+      if type(cells) ~= "number" or cells <= 0 then cells = nil end
+      if source == lastSource and val == lastStatInput and cells == lastStatCells and cachedText ~= nil then
         return cachedText
       end
       lastSource = source
       lastStatInput = val
-      if themeCommon and type(themeCommon.formatCellVoltage) == "function" then
+      lastStatCells = cells
+      if cells then
+        local num = tonumber(val)
+        raw = (num and num > 0) and string.format("%.2fV/c", num / cells) or "--.-V/c"
+      elseif themeCommon and type(themeCommon.formatCellVoltage) == "function" then
         local ok, res = pcall(themeCommon.formatCellVoltage, state, val)
         if ok and res ~= nil then raw = res end
       end

@@ -17,13 +17,27 @@ local LoadingOverlay = nil
 local ConfirmDialog = nil
 local t = nil
 
-local channelKeys = {
-  "roll", "pitch", "yaw", "collective", "throttle",
-  "aux1", "aux2", "aux3", "aux4", "aux5", "aux6", "aux7", "aux8", "aux9", "aux10", "aux11", "aux12", "aux13"
-}
-local channelDefaultNames = {
-  "Roll", "Pitch", "Yaw", "Collective", "Throttle",
-  "AUX 1", "AUX 2", "AUX 3", "AUX 4", "AUX 5", "AUX 6", "AUX 7", "AUX 8", "AUX 9", "AUX 10", "AUX 11", "AUX 12", "AUX 13"
+-- One key and fallback pair per channel, in the form the packager translates in place, so an
+-- installed suite shows the channel names in the pilot's language.
+local CHANNEL_NAMES = {
+  { labelKey = "roll", labelFallback = "Roll" },
+  { labelKey = "pitch", labelFallback = "Pitch" },
+  { labelKey = "yaw", labelFallback = "Yaw" },
+  { labelKey = "collective", labelFallback = "Collective" },
+  { labelKey = "throttle", labelFallback = "Throttle" },
+  { labelKey = "aux1", labelFallback = "AUX 1" },
+  { labelKey = "aux2", labelFallback = "AUX 2" },
+  { labelKey = "aux3", labelFallback = "AUX 3" },
+  { labelKey = "aux4", labelFallback = "AUX 4" },
+  { labelKey = "aux5", labelFallback = "AUX 5" },
+  { labelKey = "aux6", labelFallback = "AUX 6" },
+  { labelKey = "aux7", labelFallback = "AUX 7" },
+  { labelKey = "aux8", labelFallback = "AUX 8" },
+  { labelKey = "aux9", labelFallback = "AUX 9" },
+  { labelKey = "aux10", labelFallback = "AUX 10" },
+  { labelKey = "aux11", labelFallback = "AUX 11" },
+  { labelKey = "aux12", labelFallback = "AUX 12" },
+  { labelKey = "aux13", labelFallback = "AUX 13" }
 }
 
 local ui = {
@@ -364,9 +378,8 @@ function M.build(ctx)
   }
 
   for i = 1, 18 do
-    local chKey = channelKeys[i]
-    local chDefName = channelDefaultNames[i]
-    local chName = pageText(i18n, chKey, chDefName)
+    local channelName = CHANNEL_NAMES[i]
+    local chName = pageText(i18n, channelName.labelKey, channelName.labelFallback)
     local ch = ui.channels[i] or { mode = 0, value = 1500 }
 
     -- 1. Left Label
@@ -481,6 +494,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second chain beside the running one
+  -- would write the same channels twice, and the first one's reply would clear the marks under it.
+  if ui.saving then return false end
   local ok, err = queueFailsafeWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -495,6 +511,9 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- A Reload under a running save would put the stored values back into the channels the chain
+  -- has still to send.
+  if ui.saving then return true end
   local session = getSession()
   if session then
     ui.dirtyChannels = {}
@@ -528,6 +547,11 @@ function M.onClose()
   LoadingOverlay = nil
   ConfirmDialog = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

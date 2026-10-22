@@ -280,6 +280,19 @@ local function reportHookCrash(hook, menuId, err)
   return message
 end
 
+-- How often in a row a page's build may be stopped at the instruction limit before it is shown
+-- as a page that cannot be drawn. A build stopped because its pass had already spent much of the
+-- limit -- the pass that also loads the page, say -- completes on one of these; a build that does
+-- not fit in what a pass leaves it, above all one that is above the limit on its own, never
+-- completes in a widget call, and gets the failure page after this many passes.
+local BUILD_LIMIT_RETRIES = 3
+
+local function isCpuLimitStop(err)
+  local fn = _G.rfsuite and _G.rfsuite.isCpuLimitError
+  if type(fn) == "function" then return fn(err) == true end
+  return type(err) == "string" and string.find(err, "CPU limit", 1, true) ~= nil
+end
+
 local function ensurePageRegistry()
   if not PageRegistry then
     PageRegistry = loadModule("app/pages/init.lua")
@@ -318,11 +331,13 @@ local SAVE_TEXT = {
   done_message = "@i18n(app.save.done_message)@",
   timeout_title   = "@i18n(app.save.timeout_title)@",
   timeout_message = "@i18n(app.save.timeout_message)@",
+  restart_unconfirmed = "@i18n(app.save.restart_unconfirmed)@",
   failed_title    = "@i18n(app.save.failed_title)@",
   failed_message  = "@i18n(app.save.failed_message)@",
   eeprom_pending  = "@i18n(app.save.eeprom_pending)@",
   read_required   = "@i18n(app.save.read_required)@",
   page_changed    = "@i18n(app.save.page_changed)@",
+  profile_changed = "@i18n(app.save.profile_changed)@",
   confirm_required = "@i18n(app.save.confirm_required)@",
 }
 
@@ -514,9 +529,9 @@ local function normalizeCellVoltage(value, fallback)
   end
   -- Accept the encodings the battery config is stored in:
   -- volts (4.2), decivolts (42), centivolts (420), millivolts (4200).
-  if v > 1000 then
+  if v >= 1000 then
     v = v / 1000
-  elseif v > 100 then
+  elseif v >= 100 then
     v = v / 100
   elseif v > 10 then
     v = v / 10
@@ -565,6 +580,9 @@ state = {
   -- It suppresses that page's `wakeup` while the failure page is on screen and is cleared the
   -- moment the menu moves, so re-entering the page tries the build again.
   pageBuildFailed = nil,
+  -- How many builds in a row of the page on screen were stopped at the instruction limit; see
+  -- BUILD_LIMIT_RETRIES. Counted per visit, like the latch.
+  buildLimitStops = 0,
   helpContent = nil,
   helpPageTitle = nil,
   helpPageSubtitle = nil,
@@ -577,6 +595,13 @@ state = {
   saveOutcome = nil,
   saveOverlayVisible = false,
   armedNoticeVisible = false,
+  -- The question put to a pilot who leaves a page with changes on it: save, discard, or stay.
+  leavePromptVisible = false,
+  -- When a page put that question before a change of its own rather than before Back: the page,
+  -- its message, and what Save and Discard do there instead of what they do on Back.
+  leavePromptAnswers = nil,
+  -- Whether the header drawn last offered Save; the question above is only put where it did.
+  headerSaveOffered = false,
   armedFeedbackUntil = nil,
   armedFeedbackText = nil,
   lastSaveSnapshot = nil,
@@ -629,7 +654,7 @@ state = {
     pendingValues = { pid_profile = nil, rate_profile = nil, battery_profile = nil },
     lastEnabled = { governor_state = nil }
   },
-  telemetryState = { profile = 1, rateProfile = 1, batteryProfile = 1, voltage = 0, bec_voltage = 0, escTemp = 0, fuel = 100, armFlags = 0, governor = 0, themeConfig = { v_min = 18.0 } },
+  telemetryState = { profile = 1, rateProfile = 1, batteryProfile = nil, voltage = 0, bec_voltage = 0, escTemp = 0, fuel = 100, armFlags = 0, governor = 0, themeConfig = { v_min = 18.0 } },
   -- Handed to the active page's wakeup and to the audio poll respectively, and refilled rather
   -- than rebuilt each time. They are containers only: nothing is read back out of them here.
   wakeupContext = {},
@@ -801,6 +826,29 @@ local function buildPageContext()
   }
 end
 
+-- Ends every page the registry holds: the page on screen loses its reads first, so none of them
+-- can come back to a torn-down tree, and each page's onClose then runs -- which is where a page
+-- queues the write that switches its override off or rolls back a live change. Those writes stay
+-- on the queue under the page's client. Safe to run more than once and in any phase: once the
+-- closing sequence has let go of the registry there is nothing left to release.
+local function releasePages()
+  if state.activePageMenuId ~= nil and MspRuntime and type(MspRuntime.dropClientReads) == "function" then
+    pcall(MspRuntime.dropClientReads, mspClientForMenu(state.activePageMenuId))
+  end
+  if PageRegistry and type(PageRegistry.releaseAll) == "function" then
+    logToFile("Releasing all pages in registry.")
+    pcall(PageRegistry.releaseAll, buildPageContext())
+  elseif state.activePageMenuId and PageRegistry and type(PageRegistry.release) == "function" then
+    logToFile("Releasing active page: " .. tostring(state.activePageMenuId))
+    pcall(PageRegistry.release, state.activePageMenuId, buildPageContext())
+  end
+  state.activePageMenuId = nil
+  state.pageBuildFailed = nil
+  if MspRuntime and type(MspRuntime.setDefaultClient) == "function" then
+    pcall(MspRuntime.setDefaultClient, TOOL_MSP_CLIENT)
+  end
+end
+
 local function scheduleBuildUI(withGc)
   state.pendingBuildUI = true
   if withGc == true then
@@ -849,6 +897,7 @@ local function syncActivePageModule()
   end
   -- The latch belongs to the page that is leaving. Re-entering it is a fresh attempt.
   state.pageBuildFailed = nil
+  state.buildLimitStops = 0
 
   -- From here everything queued belongs to the page that is up, without the page saying so: the
   -- pages hold the queue itself and none of them names a client.
@@ -937,6 +986,18 @@ local function onBack(source, ev)
   -- before this line, so the window does not keep sliding while a key is held.
   state.lastBackTick = now
 
+  -- Back while the question about unsaved changes stands is the answer "stay": the box goes and
+  -- the page comes back with its changes. A second press in a row can therefore never discard.
+  if state.leavePromptVisible then
+    state.leavePromptVisible = false
+    state.leavePromptAnswers = nil
+    if fromEvent then
+      state.suppressBackFrames = 6
+    end
+    scheduleBuildUI(false)
+    return
+  end
+
   -- A save that reboots holds the page: the values are on their way to a flight controller that
   -- is about to restart, and leaving would put a page on screen showing what it read before.
   -- Once the settings are in EEPROM there is nothing left to protect, so from that moment the
@@ -1005,6 +1066,32 @@ local function onBack(source, ev)
           state.suppressBackFrames = 6
         end
         scheduleBuildUI(true)
+        return
+      end
+    end
+
+    -- Leaving releases the page, and with it every value changed on it and not saved. A page
+    -- that can tell says so through `hasUnsavedChanges`, and then the pilot is asked first --
+    -- where the header offers Save, since that is the other answer. Not while the model is
+    -- armed: a save to the flight controller is refused then, and a question standing between
+    -- the pilot and the way out is the one thing that must not be.
+    -- Nor while a save of this page is still on its way: its notice is what is on screen, and
+    -- the page's flag only clears once the write has answered. Back then behaves as before.
+    local saving = state.pendingSaveAction ~= nil
+      or (SavePipeline and type(SavePipeline.isActive) == "function" and SavePipeline.isActive())
+    if pageModule and type(pageModule.hasUnsavedChanges) == "function" and state.headerSaveOffered
+      and not saving and not isModelArmed() then
+      local ok, unsaved = pcall(pageModule.hasUnsavedChanges)
+      if not ok then
+        reportHookCrash("activePage.hasUnsavedChanges", currentMenuId, unsaved)
+      elseif unsaved == true then
+        logf("debug", "leave prompt on %s", tostring(currentMenuId))
+        state.leavePromptAnswers = nil
+        state.leavePromptVisible = true
+        if fromEvent then
+          state.suppressBackFrames = 6
+        end
+        scheduleBuildUI(false)
         return
       end
     end
@@ -1219,8 +1306,12 @@ local function maybeShowUnsupportedMspDialog()
     return
   end
 
+  -- The version the board answered with. `apiVersion` itself is reset to "0" by the refusal,
+  -- which is what this notice used to name.
   local apiVersion = nil
-  if type(session) == "table" and session.apiVersion ~= nil then
+  if type(session) == "table" and session.refusedApiVersion ~= nil then
+    apiVersion = session.refusedApiVersion
+  elseif type(session) == "table" and session.apiVersion ~= nil then
     apiVersion = session.apiVersion
   elseif type(diagnostics) == "table" and diagnostics.apiVersion ~= nil then
     apiVersion = diagnostics.apiVersion
@@ -1237,7 +1328,9 @@ local function maybeShowUnsupportedMspDialog()
   local prefix = tr("app.msp.unsupported_message_prefix", "MSP API version ")
   local suffix = tr("app.msp.unsupported_message_suffix", " is not supported.")
   local supportedLabel = tr("app.msp.supported_label", "Supported: ")
+  local minimum = tr("app.msp.minimum_firmware", "This suite needs Rotorflight 4.6 or newer.")
   local message = prefix .. version .. suffix .. "\n" .. supportedLabel .. tostring(supported)
+    .. "\n" .. minimum
 
   local dialog = getMspUnsupportedDialogModule()
   if dialog then
@@ -1361,6 +1454,10 @@ local function returnToRootOnDisconnect()
 
   closeHelpDialogIfOpen()
   state.pendingMenuOpen = nil
+  -- Nothing can be saved over a link that has gone, so the question is not asked: the page goes
+  -- with the rest of the menu.
+  state.leavePromptVisible = false
+  state.leavePromptAnswers = nil
 
   local stepped = false
   while state.menu and (not state.menu.isRoot()) do
@@ -1937,10 +2034,11 @@ local function onReload()
 end
 
 -- Read-backed pages own the completion condition: a loading overlay disappearing is not
--- proof that every record needed by their write was received and accepted.
+-- proof that every record needed by their write was received and accepted. A page may name why
+-- it refuses as a second value; "profile_changed" is the one with a notice of its own.
 local function checkPageSaveReady(page)
   if type(page.canSave) ~= "function" then return true end
-  local ok, ready = pcall(page.canSave)
+  local ok, ready, reason = pcall(page.canSave)
   if not ok then
     reportHookCrash("activePage.canSave", state.activePageMenuId, ready)
   end
@@ -1948,7 +2046,7 @@ local function checkPageSaveReady(page)
   reportSaveOutcome({
     ok = false,
     title = SAVE_TEXT.failed_title,
-    message = SAVE_TEXT.read_required
+    message = (ok and reason == "profile_changed") and SAVE_TEXT.profile_changed or SAVE_TEXT.read_required
   })
   return false
 end
@@ -1985,7 +2083,14 @@ local function blockSaveWhileArmed()
   return false
 end
 
-local function onSave()
+-- `fromLeavePrompt` is the Save of the question asked when a page with changes is left. That
+-- answer IS the confirmation, so the preference's own question is not put a second time; the two
+-- that override the preference -- an arming state that cannot be read, a page that requires its
+-- question -- are asked as on any other save.
+-- `onSaved` is what a page asked to happen once this save is done (askUnsavedChanges below). It is
+-- handed to the page's onSave, which alone knows when its writes have been taken, and is never run
+-- for a save that is refused before it reaches the page.
+local function onSave(fromLeavePrompt, onSaved)
   if blockSaveWhileArmed() then return end
 
   local page = getActivePageModule()
@@ -2016,7 +2121,8 @@ local function onSave()
           savePreferences = performSave,
           refresh = M.buildUI,
           requestRebuild = requestRebuild,
-          reportSave = reportSaveOutcome
+          reportSave = reportSaveOutcome,
+          onSaved = onSaved
         })
 
         if not ok then
@@ -2052,7 +2158,8 @@ local function onSave()
     end
 
     -- Check preference and show confirm dialog if enabled.
-    local savePref = state.preferences and state.preferences.general and state.preferences.general.save_confirm
+    local savePref = fromLeavePrompt ~= true and state.preferences and state.preferences.general
+      and state.preferences.general.save_confirm
     -- The confirmation is a preference, except when the armed state cannot be read: then it is
     -- asked whatever the preference says, because the alternative is writing to a flight
     -- controller that may be armed without anybody having been told the check did not run.
@@ -2144,6 +2251,70 @@ local function onSave()
     title = "Save",
     message = "Save to FBL is not wired yet."
   })
+end
+
+-- The three answers to the question about unsaved changes. Save is the header's own Save and the
+-- page stays: the save is watched where every save is, and the next Back leaves a page that has
+-- nothing unsaved left. Leaving at once instead would release the page while its writes are
+-- still out, and their replies would then arrive at a page that is gone.
+--
+-- Where a page put the question before a change of its own (askUnsavedChanges), Save and Discard
+-- do what that page asked instead, and only while it is still the page on screen.
+local function leavePromptSave()
+  local answers = state.leavePromptAnswers
+  state.leavePromptVisible = false
+  state.leavePromptAnswers = nil
+  if answers and answers.page ~= getActivePageModule() then
+    scheduleBuildUI(false)
+    return
+  end
+  onSave(true, answers and answers.saved or nil)
+  scheduleBuildUI(false)
+end
+
+local function leavePromptDiscard()
+  local answers = state.leavePromptAnswers
+  state.leavePromptVisible = false
+  state.leavePromptAnswers = nil
+  if not answers then
+    leaveCurrentPage(false)
+    return
+  end
+  if answers.page == getActivePageModule() and type(answers.discard) == "function" then
+    local ok, err = pcall(answers.discard)
+    if not ok then
+      reportHookCrash("activePage.discard", state.activePageMenuId, err)
+    end
+  end
+  scheduleBuildUI(false)
+end
+
+local function leavePromptStay()
+  state.leavePromptVisible = false
+  state.leavePromptAnswers = nil
+  scheduleBuildUI(false)
+end
+
+-- The same question, put by a page before a change of its own that would drop what is not saved:
+-- the Servos pages hold the edit of one servo at a time, and picking another would lose it. The
+-- box, its buttons and Back on it are the ones above; the page gives the message, `saved` (run by
+-- its onSave once its write is done) and `discard` (run instead of leaving). It is put under the
+-- same conditions as on Back; where it cannot be, the answer is false and the page keeps what it
+-- has.
+local function askUnsavedChanges(page, answers)
+  if type(answers) ~= "table" or page == nil or page ~= getActivePageModule() then return false end
+  local saving = state.pendingSaveAction ~= nil
+    or (SavePipeline and type(SavePipeline.isActive) == "function" and SavePipeline.isActive())
+  if not state.headerSaveOffered or saving or isModelArmed() then return false end
+  state.leavePromptAnswers = {
+    page = page,
+    message = answers.message,
+    saved = answers.saved,
+    discard = answers.discard
+  }
+  state.leavePromptVisible = true
+  scheduleBuildUI(false)
+  return true
 end
 
 local function getCardPressHandler(cardId)
@@ -2444,6 +2615,12 @@ function M.buildUI()
         elseif saveProgress.status ~= "done" then
           title = SAVE_TEXT.failed_title
           message = SAVE_TEXT.failed_message
+        elseif result.reboot == true and result.rebootProven ~= true then
+          -- Stored, and the board answers again, but nothing showed that it restarted: settings
+          -- that take effect at boot may not be in effect yet. The pipeline leaves this notice
+          -- standing instead of clearing it as a success.
+          title = SAVE_TEXT.saved_title
+          message = SAVE_TEXT.restart_unconfirmed
         else
           title = SAVE_TEXT.saved_title
           message = SAVE_TEXT.done_message
@@ -2497,6 +2674,40 @@ function M.buildUI()
     })
     lvgl.build(lyt)
     state.saveOverlayVisible = true
+    return
+  end
+
+  -- The tool's own box rather than a native confirmation: that one has two answers, and Back on
+  -- it is the same answer as its No, so a three-way question cannot be put through it without
+  -- making the key that left the page also discard what was on it. Drawn here, the box is part of
+  -- the run loop like every other notice, and Back on it means stay (onBack). The first button is
+  -- the one that changes nothing, so a press of Enter straight after Back neither writes nor
+  -- discards.
+  if state.leavePromptVisible then
+    if lvgl and type(lvgl.clear) == "function" then lvgl.clear() end
+    local lyt = {
+      {
+        type = "rectangle",
+        x = 0, y = 0, w = LCD_W or 320, h = LCD_H or 240,
+        color = COLOR_THEME_PRIMARY3,
+        filled = true
+      }
+    }
+    LoadingOverlay.append(lyt, {
+      x = 0,
+      y = 0,
+      w = LCD_W or 320,
+      h = LCD_H or 240,
+      title = "@i18n(app.save.leave_title)@",
+      message = (state.leavePromptAnswers and state.leavePromptAnswers.message) or "@i18n(app.save.leave_message)@",
+      bar = false,
+      actions = {
+        { text = "@i18n(app.save.leave_stay)@", press = leavePromptStay },
+        { text = "@i18n(app.save.leave_save)@", press = leavePromptSave },
+        { text = "@i18n(app.save.leave_discard)@", press = leavePromptDiscard }
+      }
+    })
+    lvgl.build(lyt)
     return
   end
 
@@ -2590,6 +2801,9 @@ function M.buildUI()
     -- this one rather than growing a second wording for the same event.
     reportHookCrash = reportHookCrash
   })
+  -- What Back asks about unsaved changes depends on it: a page that does not offer Save has
+  -- nothing the pilot could save instead of leaving.
+  state.headerSaveOffered = actions.save == true
 
   -- Save and Reload remain interactive when armed on pages that declare them, so pressing
   -- either reaches onSave / onReload to report the armed refusal (modal dialog or non-blocking
@@ -2754,6 +2968,8 @@ function M.buildUI()
         -- finished -- needs the same route the back key takes. Passing it here rather than having
         -- the page reach into the menu keeps the navigation in one place.
         requestClose = function() leaveCurrentPage(false) end,
+        -- The unsaved-changes question, for a page about to drop an edit of its own accord.
+        askUnsavedChanges = function(answers) return askUnsavedChanges(pageModule, answers) end,
         openHelp = function(message, title, subtitle)
           local resolvedTitle = title or pageTitle
           local resolvedSubtitle = subtitle
@@ -2767,19 +2983,35 @@ function M.buildUI()
 
       if ok then
         state.pageBuildFailed = nil
+        state.buildLimitStops = 0
       else
-        reportHookCrash("activePage.build", currentMenuId, err)
+        -- Stopped at the instruction limit, which happens only where the tool runs inside the
+        -- dashboard widget. EdgeTX raises that stop once per call and lets the rest of the call
+        -- run, so this pass ends normally, and the build is simply run again on the next pass,
+        -- BUILD_LIMIT_RETRIES times in a row at most, rather than being reported at once as a page
+        -- that cannot be drawn. The body stays empty meanwhile.
+        local retry = isCpuLimitStop(err) and state.buildLimitStops < BUILD_LIMIT_RETRIES
+        if retry then
+          state.buildLimitStops = state.buildLimitStops + 1
+          logf("info", "build of %s stopped at the instruction limit, built again on the next pass (%d of %d)",
+            tostring(currentMenuId), state.buildLimitStops, BUILD_LIMIT_RETRIES)
+          scheduleBuildUI(false)
+        else
+          reportHookCrash("activePage.build", currentMenuId, err)
+        end
         -- The page's own `wakeup` keeps being called while this failure page is up, and a page
         -- that did not finish building is the likeliest one to raise there too -- once per tick,
         -- through a reporter that writes to the serial port whatever the preferences say. Worse,
         -- a `requestRebuild` from such a wakeup rebuilds into the same raise. The latch stops
-        -- that without deciding the page is dead: leaving the menu clears it.
+        -- that without deciding the page is dead: leaving the menu clears it, and so does the
+        -- next build that completes.
         state.pageBuildFailed = currentMenuId
         -- The header is resolved before the page is built, so a page that declared Save, Reload
         -- or a star still offers all three on a screen its own build never finished -- and each
         -- of them would act on a page that does not exist. They come off. Help stays: it is
         -- answered for this menu id by the help registry, which never needed the build to run.
         actions.save = false
+        state.headerSaveOffered = false
         actions.reload = false
         actions.star = false
         -- Everything the page appended before it raised belongs to a screen that will never be
@@ -2789,7 +3021,9 @@ function M.buildUI()
         if bannerH > 0 then
           appendArmedBanner(children, contentX, 0, contentW, bannerH, currentArmedBannerText())
         end
-        appendPageBuildError(children, contentX, contentY, contentW, pageBodyH, state.i18n, currentMenuId, err)
+        if not retry then
+          appendPageBuildError(children, contentX, contentY, contentW, pageBodyH, state.i18n, currentMenuId, err)
+        end
       end
     else
       local gridItems = state.menu.getCards()
@@ -2984,6 +3218,9 @@ function M.init(opts)
   state.saveOutcome = nil
   state.saveOverlayVisible = false
   state.armedNoticeVisible = false
+  state.leavePromptVisible = false
+  state.leavePromptAnswers = nil
+  state.headerSaveOffered = false
   state.armedFeedbackUntil = nil
   state.armedFeedbackText = nil
   state.connStatusNoticeVisible = false
@@ -3173,6 +3410,10 @@ function M.run(event, touchState)
         dropMspResponseCache()
       end
       if armed then
+        -- The question about unsaved changes is not left standing over an armed model. The page
+        -- comes back with its changes, and Back now leaves it without asking (onBack).
+        state.leavePromptVisible = false
+        state.leavePromptAnswers = nil
         -- Clear MSP queue to abort any pending MSP operations immediately
         ensureMspRuntime()
         if MspRuntime and type(MspRuntime.getState) == "function" then
@@ -3259,30 +3500,15 @@ function M.run(event, touchState)
         state.pendingSaveAction = nil
         state.saveOutcome = nil
         state.saveOverlayVisible = false
+        state.leavePromptVisible = false
+        state.leavePromptAnswers = nil
         state.pendingMenuOpen = nil
         closeHelpDialogIfOpen()
         
-        -- Same as on a page change, and for the same reason: the page on screen loses its reads
-        -- before it is released, so none of them can come back to a torn-down tree. Its writes
-        -- stay -- the shutdown ticks below are there to get exactly those out.
-        if state.activePageMenuId ~= nil and MspRuntime and type(MspRuntime.dropClientReads) == "function" then
-          pcall(MspRuntime.dropClientReads, mspClientForMenu(state.activePageMenuId))
-        end
+        -- Release all pages in the registry (queues override/rollback resets). Its writes stay --
+        -- the shutdown ticks below are there to get exactly those out.
+        releasePages()
 
-        -- Release all pages in the registry to free their resources (queues override/rollback resets)
-        if PageRegistry and type(PageRegistry.releaseAll) == "function" then
-          logToFile("Releasing all pages in registry.")
-          pcall(PageRegistry.releaseAll, buildPageContext())
-        elseif state.activePageMenuId and PageRegistry and type(PageRegistry.release) == "function" then
-          logToFile("Releasing active page: " .. tostring(state.activePageMenuId))
-          pcall(PageRegistry.release, state.activePageMenuId, buildPageContext())
-        end
-        state.activePageMenuId = nil
-        state.pageBuildFailed = nil
-        if MspRuntime and type(MspRuntime.setDefaultClient) == "function" then
-          pcall(MspRuntime.setDefaultClient, TOOL_MSP_CLIENT)
-        end
-        
         -- Hosted, the event runner is the host's and stays running.
         if not state.hosted and Events and type(Events.reset) == "function" then
           logToFile("Resetting events.")
@@ -3669,13 +3895,22 @@ function M.run(event, touchState)
           ts.lqSource = (Sensors.active_paths and Sensors.active_paths.link) or ts.lqSource
           ts.profile = roundInt(Sensors.getValue("pid_profile") or ts.profile, ts.profile or 1)
           ts.rateProfile = roundInt(Sensors.getValue("rate_profile") or ts.rateProfile, ts.rateProfile or 1)
-          ts.batteryProfile = roundInt(Sensors.getValue("battery_profile") or ts.batteryProfile, ts.batteryProfile or 1)
+          ts.batteryProfile = roundInt(Sensors.getValue("battery_profile") or ts.batteryProfile, ts.batteryProfile)
           ts.armFlags = roundInt(armFlagsValue or ts.armFlags, ts.armFlags or 0)
           local armDisableFlagsValue = Sensors.getValue("armdisableflags")
           if type(armDisableFlagsValue) == "number" then
             ts.armDisableFlags = math.max(0, math.floor(armDisableFlagsValue + 0.5))
           end
           ts.governor = roundInt(Sensors.getValue("governor") or ts.governor, ts.governor or 0)
+          -- This pass's reading and nil while nothing answers, never a held or a made-up 0:
+          -- lib/audio.lua speaks a rescue on a change between two readings, and a 0 standing in
+          -- for a sensor not found yet would make its first real reading look like one. Read
+          -- only while one of its announcements is on (`rescueWanted`, set by lib/audio.lua).
+          if state.audioState and state.audioState.rescueWanted then
+            ts.rescue = roundInt(Sensors.getValue("rescue"), nil)
+          else
+            ts.rescue = nil
+          end
           ts.mcuTemp = roundInt(Sensors.getValue("temp_mcu") or ts.mcuTemp, ts.mcuTemp or 0)
           ts.escTemp = roundInt(Sensors.getValue("temp_esc") or ts.escTemp, ts.escTemp or 0)
           ts.bec_voltage = Sensors.getValue("bec_voltage") or ts.bec_voltage
@@ -3688,6 +3923,17 @@ function M.run(event, touchState)
           end
           ts.current = currentValue or ts.current
           ts.watts = wattsValue or ts.watts
+          -- ESC load, as the dashboard widget derives it (widgets/dashboard/runtime.lua): this
+          -- tick's current as a share of the limit in the per-model store, and nil -- not the last
+          -- value -- where either is missing, so the ESC load alert judges what the widget's would.
+          local modelPrefs = _G.rfsuite and _G.rfsuite.session and _G.rfsuite.session.modelPreferences
+          local escLimit = tonumber(type(modelPrefs) == "table" and type(modelPrefs.battery) == "table"
+            and modelPrefs.battery.esc_current_limit or nil)
+          if escLimit and escLimit > 0 and type(currentValue) == "number" then
+            ts.escLoad = currentValue / escLimit * 100
+          else
+            ts.escLoad = nil
+          end
           ts.altitude = Sensors.getValue("altitude") or ts.altitude
           ts.consumedMah = (smart and smart.consumption) or Sensors.getValue("smartconsumption") or ts.consumedMah
 
@@ -3724,6 +3970,51 @@ function M.run(event, touchState)
 
           ts.rss1 = readFirstSensorNumber(RSS1_SOURCES, ts.rss1)
           ts.rss2 = readFirstSensorNumber(RSS2_SOURCES, ts.rss2)
+          -- The transmitter's power, which only the TX power alert uses: read only while that alert
+          -- is on (`txPowerWanted`, set by lib/audio.lua), into the field the dashboard widget uses,
+          -- and this pass's reading or nil -- never a held value.
+          if state.audioState and state.audioState.txPowerWanted then
+            ts.tpwr = Sensors.getValue("TPWR")
+          else
+            ts.tpwr = nil
+          end
+
+          -- The readings only the link headroom and SNR alerts use, each read only while an alert
+          -- that needs it is on (flags set by lib/audio.lua): the air rate under either flag, the
+          -- antenna in use and the signal at the transmitter module under `linkHeadroomWanted`,
+          -- the two signal-to-noise ratios under `linkSnrWanted`. Into the fields the dashboard
+          -- widget uses, and this pass's reading or nil -- never a held value.
+          local la = state.audioState
+          local headroomWanted = la and la.linkHeadroomWanted
+          local snrWanted = la and la.linkSnrWanted
+          if headroomWanted or snrWanted then
+            ts.rfMode = Sensors.getValue("RFMD")
+          else
+            ts.rfMode = nil
+          end
+          if headroomWanted then
+            ts.antenna = Sensors.getValue("ANT")
+            ts.trss = Sensors.getValue("TRSS")
+          else
+            ts.antenna = nil
+            ts.trss = nil
+          end
+          if snrWanted then
+            ts.rsnr = Sensors.getValue("RSNR")
+            ts.tsnr = Sensors.getValue("TSNR")
+          else
+            ts.rsnr = nil
+            ts.tsnr = nil
+          end
+
+          -- The skipped-frame counter, for the telemetry dropouts alert in lib/audio.lua, as the
+          -- widget's readTelemetry reads it: a reading or nil, and only while that alert is on
+          -- (`dropoutsWanted`, set by lib/audio.lua). Here it is read on every audio tick.
+          if state.audioState and state.audioState.dropoutsWanted then
+            ts.skippedFrames = Sensors.getValue("skipped_frames")
+          else
+            ts.skippedFrames = nil
+          end
         end
 
         local modelName = nil
@@ -3771,16 +4062,31 @@ function M.run(event, touchState)
         state.telemetryState.armDisableFlags = nil
         state.telemetryState.armed = nil
         state.telemetryState.governor = nil
+        state.telemetryState.rescue = nil
         state.telemetryState.mcuTemp = nil
         state.telemetryState.escTemp = nil
         state.telemetryState.throttlePercent = nil
         state.telemetryState.current = nil
         state.telemetryState.watts = nil
+        state.telemetryState.escLoad = nil
         state.telemetryState.altitude = nil
         state.telemetryState.consumedMah = nil
         state.telemetryState.batteryCellCount = nil
         state.telemetryState.rss1 = nil
         state.telemetryState.rss2 = nil
+        state.telemetryState.tpwr = nil
+        state.telemetryState.rfMode = nil
+        state.telemetryState.antenna = nil
+        state.telemetryState.trss = nil
+        state.telemetryState.rsnr = nil
+        state.telemetryState.tsnr = nil
+        -- What the link headroom alerts learned about this link (lib/audio.lua, lib/link_rates.lua),
+        -- cleared where the dashboard widget clears the same fields on its own state
+        -- (widgets/dashboard/runtime.lua, updateConnectionState): the next link may be a
+        -- reflashed or swapped module.
+        state.telemetryState.linkGeneration = nil
+        state.telemetryState.linkPingSent = nil
+        state.telemetryState.skippedFrames = nil
       else
         -- Still not ready, and not the edge either -- the stretch in between. Nothing here is
         -- connection state, so there is nothing to announce and nothing to clear, but the
@@ -3851,6 +4157,11 @@ end
 -- `requestClose` starts the same closing sequence the back key starts at the top of the menu,
 -- for a host that has to end the tool on a condition of its own: the page's releases and the
 -- queued writes still go out over the ticks that follow, and `run` returns 2 when it is done.
+--
+-- `releasePages` is the part of that sequence a host cannot do without when it ends the tool at
+-- once, without the passes the sequence takes: every page's onClose, so a page cannot leave an
+-- override switched on or an edit scope set behind it. The writes it queues are the host's MSP
+-- runtime's to send.
 local function requestClose()
   if state.menu and not state.isClosing then
     state.isClosing = true
@@ -3862,5 +4173,6 @@ return {
   run = M.run,
   useLvgl = true,
   requestRebuild = scheduleBuildUI,
-  requestClose = requestClose
+  requestClose = requestClose,
+  releasePages = releasePages
 }

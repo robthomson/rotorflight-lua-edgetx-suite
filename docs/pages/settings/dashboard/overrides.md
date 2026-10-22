@@ -45,6 +45,10 @@ With no setting to show, the page says the model uses the standard values.
 - A card from an earlier version stored every value of a theme saved while a flight controller
   was connected, so its list can show rows whose value equals the standard. Saving that theme
   once from here, or resetting the rows, removes them.
+- A reset is written to the model's file the moment it is pressed. Where that write fails, the
+  page says *Save failed* with the reason: *the settings file could not be written to the SD
+  card*, or *model settings store not available* where the part of the suite that writes the
+  model's file could not be loaded.
 - A reset does not turn per-model settings off: the model keeps *Own settings for this model* on, and its
   theme choice on *Design* is not touched. Turning them off is done on *Design*, and keeps
   the values.

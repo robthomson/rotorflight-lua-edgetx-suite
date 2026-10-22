@@ -100,6 +100,7 @@ end
 
 local function queueRcRead(isAutoReload)
   if ui.runtime.readPending then return false, "read_pending" end
+  ui.runtime.readComplete = false
   if not MspRuntime or not StatusApi or not NameApi or not AdvancedConfigApi or not FeatureConfigApi or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -110,6 +111,7 @@ local function queueRcRead(isAutoReload)
     return false, "msp_queue_unavailable"
   end
 
+  local readValid = true
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -125,6 +127,7 @@ local function queueRcRead(isAutoReload)
     simulatorResponse = StatusApi.simulatorResponse,
     processReply = function(self, buf)
       local parsedStatus = StatusApi.parse(buf)
+      if type(parsedStatus) ~= "table" then return Common.failPageRead(ui) end
       if parsedStatus then
         local delta = tonumber(parsedStatus.task_delta_time_gyro) or 0
         if delta > 0 then
@@ -138,6 +141,7 @@ local function queueRcRead(isAutoReload)
         simulatorResponse = NameApi.simulatorResponse,
         processReply = function(self, buf)
           local parsedName = NameApi.parse(buf)
+          if type(parsedName) ~= "table" then return Common.failPageRead(ui) end
           if parsedName then
             ui.config.name = parsedName.name or ""
           end
@@ -148,6 +152,7 @@ local function queueRcRead(isAutoReload)
             simulatorResponse = AdvancedConfigApi.simulatorResponse,
             processReply = function(self, buf)
               local parsedAdv = AdvancedConfigApi.parse(buf)
+              if type(parsedAdv) ~= "table" then return Common.failPageRead(ui) end
               if parsedAdv then
                 ui.config.pid_process_denom = parsedAdv.pid_process_denom or 1
                 ui.config.gyro_sync_denom_compat = parsedAdv.gyro_sync_denom_compat or 1
@@ -159,6 +164,7 @@ local function queueRcRead(isAutoReload)
                 simulatorResponse = FeatureConfigApi.simulatorResponse,
                 processReply = function(self, buf)
                   local parsedFeat = FeatureConfigApi.parse(buf)
+                  if type(parsedFeat) ~= "table" then return Common.failPageRead(ui) end
                   if parsedFeat then
                     ui.config.enabledFeatures = parsedFeat.enabledFeatures or 0
                   end
@@ -180,11 +186,13 @@ local function queueRcRead(isAutoReload)
                   ui.loading = false
                   ui.dirty = false
                   ui.progress = 100
+                  ui.runtime.readComplete = readValid
                   if type(ui.runtime.requestRebuild) == "function" then
                     ui.runtime.requestRebuild()
                   end
                 end,
                 errorHandler = function()
+                  readValid = false
                   ui.runtime.readPending = false
                   ui.loading = false
                   if type(ui.runtime.requestRebuild) == "function" then
@@ -194,6 +202,7 @@ local function queueRcRead(isAutoReload)
               })
             end,
             errorHandler = function()
+              readValid = false
               ui.runtime.readPending = false
               ui.loading = false
               if type(ui.runtime.requestRebuild) == "function" then
@@ -203,6 +212,7 @@ local function queueRcRead(isAutoReload)
           })
         end,
         errorHandler = function()
+          readValid = false
           ui.runtime.readPending = false
           ui.loading = false
           if type(ui.runtime.requestRebuild) == "function" then
@@ -212,6 +222,7 @@ local function queueRcRead(isAutoReload)
       })
     end,
     errorHandler = function()
+      readValid = false
       ui.runtime.readPending = false
       ui.loading = false
       if type(ui.runtime.requestRebuild) == "function" then
@@ -490,7 +501,14 @@ function M.build(ctx)
   )
 end
 
+-- The write replaces the whole feature word and the craft name and restarts the board, so it is
+-- sent only from what this visit read: the page's starting values are not the board's.
+function M.canSave()
+  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
+  if not M.canSave() then return false, "loaded_data_missing" end
   local ok, err = queueRcWrite(ctx and ctx.i18n)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -545,6 +563,11 @@ function M.onClose()
   StatusApi = nil
   LoadingOverlay = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

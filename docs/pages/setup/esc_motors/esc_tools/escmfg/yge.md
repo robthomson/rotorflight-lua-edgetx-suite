@@ -21,7 +21,6 @@ while the model is armed.
 
 | Setting | What it does |
 | --- | --- |
-| ESC Target | Meant to choose which of the model's ESCs is read and written. **The selection is not carried in the read or in the write on this page**, so both address the first ESC whatever the row shows. Present unless the flight controller has reported exactly one motor -- which includes the window before that read has answered, and permanently if it never does. |
 | Section | *Basic*, *Advanced* or *Other*. Switching it rebuilds the list below; nothing is read from the ESC again. |
 
 ### Basic
@@ -33,7 +32,7 @@ while the model is armed.
 | BEC Voltage | The BEC output, 5.5 V to 8.4 V in 0.1 V steps. On an ESC model that has a 12 V BEC the range runs to 12.0 V, and setting exactly 12.0 V is what turns that BEC on. |
 | Auto Restart Type | What the ESC does after a cutoff: *Off*, *Slowdown* or *Cutoff*. |
 | Cell Cutoff | The per-cell voltage the ESC cuts at, 2.9 V to 3.4 V. |
-| Current Limit | The ESC's current limit, 0.01 A to 655.00 A, adjusted in 1 A steps. |
+| Current Limit | The ESC's current limit, 1 A to 655 A in 1 A steps. |
 | F3C Auto | The F3C autorotation setting, *Off* or *On*. |
 | Keep mAh | Whether the ESC keeps its consumed-capacity count across a power cycle, *Off* or *On*. |
 
@@ -63,10 +62,11 @@ while the model is armed.
 ## Notes
 
 - Opening this page stores the ESC's current limit in this flight controller's preferences on the radio,
-  as whole amps, where the dashboard reads it to show the current as an ESC load percentage
+  as whole amps and marked as this family's, where the dashboard reads it to show the current
+  as an ESC load percentage and the ESC load announcement speaks it
   ([Power → Preferences](../../../power/preferences.md)). Nothing is asked of the flight
   controller for it -- the value comes out of the parameter block the page reads anyway -- and
-  a visit that finds the same limit writes nothing.
+  a visit that finds the same limit, already marked as this family's, writes nothing.
 - Saving writes the whole parameter block to the ESC, not only the settings that were changed.
   Every setting the page offers is written back as it was read unless it was edited, and so is
   everything in the block the page does not show. That includes the bits of the flags byte the

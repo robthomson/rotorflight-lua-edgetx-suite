@@ -47,6 +47,12 @@ function M.wakeup()
   local session = root.session
   if type(session) ~= "table" then return end
 
+  -- The configuration in the session is the previous board's until this read answers, and nothing
+  -- else clears it between two boards: the runner drops this module without its reset() once the
+  -- task is complete. It goes as this board's read starts, so a read that fails or is skipped
+  -- leaves the model's own battery preferences in charge rather than the previous board's rates.
+  session.smartfuel_config = nil
+
   -- Do not block the onconnect pipeline when API version is still unknown.
   -- SmartFuel page itself can read/write once API becomes available.
   if not apiVersionReady(session.apiVersion) then
@@ -102,7 +108,11 @@ function M.wakeup()
       end
       done = true
       if type(Log) == "table" and type(Log.emit) == "function" then
-        pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config received", "debug")
+        if type(data) == "table" then
+          pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config received", "debug")
+        else
+          pcall(Log.emit, "rfsuite.tasks.smartfuel", "smartfuel_config reply rejected by parser", "warn")
+        end
       end
     end,
     errorHandler = function(msg, reason)

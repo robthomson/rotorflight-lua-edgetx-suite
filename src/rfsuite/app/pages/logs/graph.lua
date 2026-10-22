@@ -143,38 +143,74 @@ end
 
 resetState()
 
--- Feeds complete lines to onLine(line, offset) for at most maxIters iterations,
+-- Hands bytes s..e of str to onLine as one line, without its trailing carriage return, if
+-- the line is neither empty nor longer than a telemetry row can be. pumpLines carries a copy of
+-- this written out for the rows inside a chunk; a change to either rule goes into both.
+local function feedLine(onLine, str, s, e, off)
+  if e >= s and string.byte(str, e) == 13 then e = e - 1 end
+  local n = e - s + 1
+  if n > 0 and n <= MAX_LINE_LEN then return onLine(str, s, e, off) end
+  return nil
+end
+
+-- Feeds complete lines to onLine(str, s, e, offset) for at most maxIters iterations,
 -- where a fed line and a chunk refill each count as one. Returns "cap" when the
 -- caller should yield, "eof" at the end of the file, "stop" when onLine returned
 -- false. The offset handed to onLine is the line's byte position in the file,
 -- which is what the sparse index stores and what the seek pass restores.
+--
+-- A line is handed over in place, as bytes s..e of the buffer, and not cut out as a string
+-- of its own: a walk calls this for every row of a log that can run to megabytes, and a new
+-- string per row was most of what it allocated. A consumer therefore matches with an
+-- anchored pattern from s, and its character classes exclude "\n" so that a match cannot run
+-- on into the next row; only bytes up to e belong to the line. On a file with CRLF line ends
+-- a capture of a row's last column therefore keeps the carriage return, which changes
+-- nothing: such a capture only ever goes to tonumber, which skips trailing white space, or to
+-- a time parse, which stops before it.
+--
+-- For the same reason a chunk read from the card becomes the buffer as it is: only the one
+-- line it completes is joined to the unfinished line before it, and that line is fed with the
+-- refill and counted as an iteration of its own; a refill in a call's last iteration still feeds
+-- it, one iteration over maxIters, where the joined buffer left it to the next call.
 local function pumpLines(onLine, maxIters)
-  for _ = 1, maxIters do
+  local n = maxIters
+  while n > 0 do
+    n = n - 1
     local buf = S.buf
     local nl = nil
     if buf ~= nil then nl = string.find(buf, "\n", S.bufpos, true) end
     if nl ~= nil then
-      local lineOff = S.filePos - #buf + S.bufpos - 1
-      local line = string.sub(buf, S.bufpos, nl - 1)
+      -- feedLine, written out: this is the path every row takes.
+      local s, e = S.bufpos, nl - 1
       S.bufpos = nl + 1
-      if string.sub(line, -1) == "\r" then line = string.sub(line, 1, -2) end
-      if #line > 0 and #line <= MAX_LINE_LEN then
-        if onLine(line, lineOff) == false then return "stop" end
+      if string.byte(buf, e) == 13 then e = e - 1 end
+      local len = e - s + 1
+      if len > 0 and len <= MAX_LINE_LEN then
+        if onLine(buf, s, e, S.filePos - #buf + s - 1) == false then return "stop" end
       end
     else
-      local rest = ""
-      if buf ~= nil then rest = string.sub(buf, S.bufpos) end
+      local rest = nil
+      if buf ~= nil and S.bufpos <= #buf then rest = string.sub(buf, S.bufpos) end
       local data = io.read(S.fh, CHUNK_SIZE)
       if data == nil or data == "" then
         S.buf, S.bufpos = nil, 1
-        if #rest > 0 and #rest <= MAX_LINE_LEN then
-          onLine(rest, S.filePos - #rest)   -- a file whose last line has no newline
+        if rest ~= nil and #rest <= MAX_LINE_LEN then
+          onLine(rest, 1, #rest, S.filePos - #rest)   -- a file whose last line has no newline
         end
         return "eof"
       end
       S.filePos = S.filePos + #data
-      S.buf = rest .. data
-      S.bufpos = 1
+      local dnl = rest and string.find(data, "\n", 1, true)
+      if rest == nil then
+        S.buf, S.bufpos = data, 1
+      elseif dnl == nil then
+        S.buf, S.bufpos = rest .. data, 1   -- no line ends in this chunk: keep collecting
+      else
+        S.buf, S.bufpos = data, dnl + 1
+        n = n - 1
+        local line = rest .. string.sub(data, 1, dnl - 1)
+        if feedLine(onLine, line, 1, #line, S.filePos - #data - #rest) == false then return "stop" end
+      end
     end
   end
   return "cap"
@@ -187,8 +223,8 @@ local function failWith(message)
   S.err = message
 end
 
-local function headerLine(line)
-  S.headerLine = line
+local function headerLine(str, s, e)
+  S.headerLine = string.sub(str, s, e)
   S.columns = {}
   S.hparsePos = 1
   S.hparseCol = 1
@@ -309,11 +345,11 @@ local function prepareStats()
   for c = 1, maxCol do
     if c > 1 then parts[#parts + 1] = "," end
     if cols[wi] == c then
-      parts[#parts + 1] = "([^,]*)"
+      parts[#parts + 1] = "([^,\n]*)"
       order[#order + 1] = c
       wi = wi + 1
     else
-      parts[#parts + 1] = "[^,]*"
+      parts[#parts + 1] = "[^,\n]*"
     end
   end
   S.statPat = "^" .. table.concat(parts)
@@ -372,33 +408,39 @@ local function statFieldsBySplit(line)
   return out
 end
 
-local function statsLine(line)
+-- The captures of one row, in column order. One table for the whole walk rather than one per
+-- row: its nine array slots are overwritten in place, which allocates nothing.
+local CAPS = { false, false, false, false, false, false, false, false, false }
+
+local function statsLine(str, s, e)
   local st = S.stats
   st.totalSamples = st.totalSamples + 1
 
-  local f
-  local caps = { string.match(line, S.statPat) }
+  local time, vbat, curr, capa, hspd, esct, thr, arm
+  local caps = CAPS
+  caps[1], caps[2], caps[3], caps[4], caps[5], caps[6], caps[7], caps[8], caps[9] =
+    string.match(str, S.statPat, s)
   if caps[1] == nil then
-    f = statFieldsBySplit(line)
+    local f = statFieldsBySplit(string.sub(str, s, e))
+    time, vbat, curr, capa = f.time, f.vbat, f.curr, f.capa
+    hspd, esct, thr, arm = f.hspd, f.esct, f.thr, f.arm
   else
-    f = {}
+    -- A statistic the header does not name has no slot, and caps[nil] reads nil.
     local at = S.statAt
-    for i = 1, #STAT_KEYS do
-      local k = STAT_KEYS[i]
-      if at[k] then f[k] = caps[at[k]] end
-    end
+    time, vbat, curr, capa = caps[at.time], caps[at.vbat], caps[at.curr], caps[at.capa]
+    hspd, esct, thr, arm = caps[at.hspd], caps[at.esct], caps[at.thr], caps[at.arm]
   end
 
-  if f.time then
-    local tSec = parseTimeSec(f.time)
+  if time then
+    local tSec = parseTimeSec(time)
     if tSec then
       if not st.startTimeSec then st.startTimeSec = tSec end
       st.endTimeSec = tSec
     end
   end
 
-  if f.vbat then
-    local v = tonumber(f.vbat)
+  if vbat then
+    local v = tonumber(vbat)
     if v and v > 2.0 then
       if not st.vStart then st.vStart = v end
       if not st.vMin or v < st.vMin then st.vMin = v end
@@ -407,8 +449,8 @@ local function statsLine(line)
     end
   end
 
-  if f.curr then
-    local c = tonumber(f.curr)
+  if curr then
+    local c = tonumber(curr)
     if c and c >= 0 then
       if c > st.cPeak then st.cPeak = c end
       st.cSum = st.cSum + c
@@ -416,33 +458,33 @@ local function statsLine(line)
     end
   end
 
-  if f.capa then
-    local cap = tonumber(f.capa)
+  if capa then
+    local cap = tonumber(capa)
     if cap and cap > 0 then st.lastCapa = cap end
   end
 
-  if f.esct then
-    local tmp = tonumber(f.esct)
+  if esct then
+    local tmp = tonumber(esct)
     if tmp and tmp > 0 then
       if not st.tStart then st.tStart = tmp end
       if not st.tMax or tmp > st.tMax then st.tMax = tmp end
     end
   end
 
-  if f.thr then
-    local thr = tonumber(f.thr)
-    if thr and thr >= 0 and thr <= 100 then
-      if thr > st.thrMax then st.thrMax = thr end
+  if thr then
+    local pct = tonumber(thr)
+    if pct and pct >= 0 and pct <= 100 then
+      if pct > st.thrMax then st.thrMax = pct end
     end
   end
 
   -- RPM, only while the motor is actually driving the head: a spool-down or an
   -- autorotation would otherwise set the minimum.
-  if f.hspd then
-    local r = tonumber(f.hspd)
+  if hspd then
+    local r = tonumber(hspd)
     if r and r > 0 then
-      local cVal = f.curr and tonumber(f.curr) or 0
-      local thrVal = f.thr and tonumber(f.thr) or 0
+      local cVal = curr and tonumber(curr) or 0
+      local thrVal = thr and tonumber(thr) or 0
 
       -- ARM is a bit field: bit 0 is ARMED, bit 1 only records that the model was armed at
       -- some point, so it stays set after a disarm. lib/audio.lua tests the same bit.
@@ -450,7 +492,7 @@ local function statsLine(line)
       -- rest on throttle and current alone.
       local isArmed = true
       if S.statCol.arm then
-        local armVal = f.arm and tonumber(f.arm) or 1
+        local armVal = arm and tonumber(arm) or 1
         isArmed = (math.floor(armVal) % 2) == 1
       end
       local isPowered = isArmed and ((thrVal >= 25) or (cVal >= 1.5))
@@ -464,9 +506,9 @@ local function statsLine(line)
   end
 end
 
-local function scanLine(line, off)
-  if S.stats then statsLine(line) end
-  local date, ts = string.match(line, "^([^,]*),([^,]*)")
+local function scanLine(str, first, last, off)
+  if S.stats then statsLine(str, first, last) end
+  local date, ts = string.match(str, "^([^,\n]*),([^,\n]*)", first)
   if date == nil then return end
   local tcs = parseTimeCs(ts)
   if tcs == nil then return end             -- a header or a malformed row
@@ -525,14 +567,14 @@ local function prepareWanted()
   end
   S.wantCols, S.wantK = cols, keys
 
-  local parts = { "^([^,]*),([^,]*)" }
+  local parts = { "^([^,\n]*),([^,\n]*)" }
   local wi = 1
   for col = 3, cols[#cols] or 2 do
     if cols[wi] == col then
-      parts[#parts + 1] = ",([^,]*)"
+      parts[#parts + 1] = ",([^,\n]*)"
       wi = wi + 1
     else
-      parts[#parts + 1] = ",[^,]*"
+      parts[#parts + 1] = ",[^,\n]*"
     end
   end
   S.xpat = table.concat(parts)
@@ -547,8 +589,8 @@ local function accumulate(wi, bi, s)
   if v > bmax[bi] then bmax[bi] = v end
 end
 
-local function extractLine(line)
-  local date, ts, s1, s2, s3, s4 = string.match(line, S.xpat)
+local function extractLine(str, s)
+  local date, ts, s1, s2, s3, s4 = string.match(str, S.xpat, s)
   if date == nil then return end
   local tcs = parseTimeCs(ts)
   if tcs == nil then return end
@@ -943,12 +985,24 @@ end
 
 -- Which of the offered column sets this log can actually serve, with the columns
 -- each one resolves to. A set needs two matches to be worth offering.
+--
+-- A model can hold two sensors of the same name -- Curr and Capa from the native CRSF
+-- battery frame beside the same names from custom telemetry -- and EdgeTX then logs
+-- both, in the order of the model's sensor list, writing the one it is not receiving
+-- as 0. Where a label repeats, the set takes the last of its columns. For a value the
+-- flight summary shows, that is the column the summary reads (last match wins in
+-- prepareStats), so the plot and the summary beside it show the same sensor. A column
+-- of the same name and another unit is a different value -- Thr(%) is the throttle
+-- the flight controller reports, a plain Thr the stick -- and is not a repeat.
 function G.getTemplates()
   local out = {}
   local byName = {}
   for c = 3, #S.columns do
     local col = S.columns[c]
-    if col and col.name ~= "" and byName[col.name] == nil then byName[col.name] = c end
+    if col and col.name ~= "" then
+      local seen = byName[col.name]
+      if seen == nil or S.columns[seen].unit == col.unit then byName[col.name] = c end
+    end
   end
   for i = 1, #TEMPLATES do
     local tpl = TEMPLATES[i]
@@ -1132,8 +1186,11 @@ function G.tick()
         break
       end
     end
+    -- The header line is let go only once the phase has moved on. A tick can be stopped
+    -- anywhere in here (the tool opened from the dashboard runs under the widget's instruction
+    -- limit), and the next tick then starts this one again: with the line still there it finds
+    -- every column parsed and redoes only what follows.
     if done then
-      S.headerLine = nil
       local cols = S.columns
       S.isTelemetry = (cols[1] and cols[1].name == "Date" and cols[2] and cols[2].name == "Time")
                       and true or false
@@ -1144,10 +1201,12 @@ function G.tick()
         -- and only a caller after a plot is refused.
         if not S.wantStats then
           failWith("not_telemetry")
+          S.headerLine = nil
           return true
         end
       end
       S.phase = "scan"
+      S.headerLine = nil
     end
     return false
   end

@@ -304,8 +304,13 @@ end
 -- an ordinary situation has to be a translated key, not a code token. A save before the ESC
 -- has been read is exactly that: an ESC that did not answer, a reply that was refused, or a
 -- page saved before the read came back.
+--
+-- Each entry is a labelKey/labelFallback pair because the packager translates that pair in
+-- place: the fallback an installed suite carries is then already in the pilot's language. A
+-- key that only reaches the lookup at the call is never translated, and the notice would ship
+-- in English in every language.
 local MESSAGE_KEYS = {
-  esc_not_read = { "save_error_not_read", "Read the ESC before saving." }
+  esc_not_read = { labelKey = "save_error_not_read", labelFallback = "Read the ESC before saving." }
 }
 
 local function queueBlheliWrite(requestRebuild)
@@ -549,13 +554,14 @@ function M.onSave(ctx)
   local ok, err = queueBlheliWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
+      local i18n = ctx.i18n
       local mapped = MESSAGE_KEYS[err]
       local message = tostring(err or "MSP write failed")
       if mapped then
-        message = pageText(ctx and ctx.i18n, mapped[1], mapped[2])
+        message = pageText(i18n, mapped.labelKey, mapped.labelFallback)
       end
       ctx.reportSave({
-        title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
+        title = pageText(i18n, "save_error_title", "Error"),
         message = message
       })
     end
@@ -607,7 +613,7 @@ function M.build(ctx)
   end
 
   if ui.loading or ui.saving then
-    local titleText = ui.loading and pageText(i18n, "loading", "Loading") or pageText(i18n, "saving", "Saving")
+    local titleText = ui.loading and pageText(i18n, "loading_title", "Loading") or pageText(i18n, "saving_title", "Saving")
     local msgText = ui.loading and pageText(i18n, "loading_data", "Loading ESC parameters...") or pageText(i18n, "saving_data", "Saving ESC parameters...")
     if LoadingOverlay and type(LoadingOverlay.append) == "function" then
       LoadingOverlay.append(children, {
@@ -684,12 +690,17 @@ function M.build(ctx)
   end
 
   if ui.currentSection == 1 then
+    -- The option values are the bytes the ESC itself stores, which BLHeli_S numbers from 1
+    -- for these rows (bitdump/BLHeli, BLHeli_S.asm, "Programming defaults"). The byte goes to
+    -- the ESC as it is, so a value numbered from 0 here would reach it one entry off. A byte
+    -- with no entry in a list (a 0 written by an earlier version of this page, say) is shown
+    -- as unknown and cannot be chosen.
     -- Basic Settings
     local dirOpts = {
-      { value = 0, label = "Normal" },
-      { value = 1, label = "Reversed" },
-      { value = 2, label = "Bidirectional 3D" },
-      { value = 3, label = "Bidirectional 3D Rev" }
+      { value = 1, label = "Normal" },
+      { value = 2, label = "Reversed" },
+      { value = 3, label = "Bidirectional 3D" },
+      { value = 4, label = "Bidirectional 3D Rev" }
     }
     local motorDirectionLabel = pageText(i18n, "esc_motor_direction", "Motor Direction")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, motorDirectionLabel, dirOpts, ui.config.motor_direction, function(val)
@@ -699,19 +710,19 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     local startupPowerOpts = {
-      { value = 0, label = "0.031" },
-      { value = 1, label = "0.047" },
-      { value = 2, label = "0.063" },
-      { value = 3, label = "0.094" },
-      { value = 4, label = "0.125" },
-      { value = 5, label = "0.188" },
-      { value = 6, label = "0.25" },
-      { value = 7, label = "0.38" },
-      { value = 8, label = "0.50" },
-      { value = 9, label = "0.75" },
-      { value = 10, label = "1.00" },
-      { value = 11, label = "1.25" },
-      { value = 12, label = "1.50" }
+      { value = 1, label = "0.031" },
+      { value = 2, label = "0.047" },
+      { value = 3, label = "0.063" },
+      { value = 4, label = "0.094" },
+      { value = 5, label = "0.125" },
+      { value = 6, label = "0.188" },
+      { value = 7, label = "0.25" },
+      { value = 8, label = "0.38" },
+      { value = 9, label = "0.50" },
+      { value = 10, label = "0.75" },
+      { value = 11, label = "1.00" },
+      { value = 12, label = "1.25" },
+      { value = 13, label = "1.50" }
     }
     local startupPowerLabel = pageText(i18n, "esc_startup_power", "Startup Power")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, startupPowerLabel, startupPowerOpts, ui.config.startup_power, function(val)
@@ -721,11 +732,11 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     local timingOpts = {
-      { value = 0, label = "Low" },
-      { value = 1, label = "Medium Low" },
-      { value = 2, label = "Medium" },
-      { value = 3, label = "Medium High" },
-      { value = 4, label = "High" }
+      { value = 1, label = "Low" },
+      { value = 2, label = "Medium Low" },
+      { value = 3, label = "Medium" },
+      { value = 4, label = "Medium High" },
+      { value = 5, label = "High" }
     }
     local motorTimingLabel = pageText(i18n, "esc_motor_timing", "Motor Timing")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, motorTimingLabel, timingOpts, ui.config.commutation_timing, function(val)
@@ -735,9 +746,9 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     local demagOpts = {
-      { value = 0, label = "Off" },
-      { value = 1, label = "Low" },
-      { value = 2, label = "High" }
+      { value = 1, label = "Off" },
+      { value = 2, label = "Low" },
+      { value = 3, label = "High" }
     }
     local demagCompensation = pageText(i18n, "esc_demag_compensation", "Demag Compensation")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, demagCompensation, demagOpts, ui.config.demag_compensation, function(val)
@@ -796,11 +807,11 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     local beaconDelayOpts = {
-      { value = 0, label = "1 minute" },
-      { value = 1, label = "2 minutes" },
-      { value = 2, label = "5 minutes" },
-      { value = 3, label = "10 minutes" },
-      { value = 4, label = "Infinite" }
+      { value = 1, label = "1 minute" },
+      { value = 2, label = "2 minutes" },
+      { value = 3, label = "5 minutes" },
+      { value = 4, label = "10 minutes" },
+      { value = 5, label = "Infinite" }
     }
     local beaconDelayLabel = pageText(i18n, "esc_beacon_delay", "Beacon Delay")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, beaconDelayLabel, beaconDelayOpts, ui.config.beacon_delay, function(val)
@@ -903,6 +914,11 @@ function M.onClose()
   ConfirmDialog = nil
   BlheliSInit = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

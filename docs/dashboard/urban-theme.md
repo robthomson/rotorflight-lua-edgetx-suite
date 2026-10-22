@@ -23,6 +23,8 @@ translations, like every other theme's, so it speaks the language of the package
 
 ## What it shows
 
+![Urban before, during and after the flight, on a TX16S MK3](../images/dashboard/themes/urban.png)
+
 **On the ground and in flight** one screen, which does not change shape at spool-up:
 
 - **Top bar** — in full screen two buttons at the left, the menu and the tool, then the clock; up to four stacked
@@ -33,7 +35,14 @@ translations, like every other theme's, so it speaks the language of the package
   and the throttle, a status line, and the PID, rate and battery profile numbers.
 - **Middle** — a vertical battery gauge with the cell count, the fuel percentage and the capacity
   used. Until the model has reported a fuel reading the gauge is empty and reads `--%` rather
-  than an empty pack.
+  than an empty pack. The fill is red at the red step and below, yellow at the yellow step and
+  below, and green above that — or orange instead of green when the pack was not full when it
+  was plugged in. The two steps are set on the *Look* page, 20 % for yellow and 0 % for red unless
+  they are changed. The not-full verdict is the suite's own, taken once per connection against
+  the flight controller's *Max cell voltage* less the *Margin* of the *Pack Not Full* announcement
+  (*Settings* → *Audio* → *Events* → *On Connect*), and it is drawn whether or not that
+  announcement is switched on. Yellow and red still come first: a not-full pack that runs down
+  turns yellow and then red like any other.
 - **Right panel** — five value rows, each chosen on the *Value Rows* page.
 - **Bottom bar** — the model name, the arm state, the transmitter power and the skipped-frame
   count. While the flight controller names reasons that block arming, the whole bar shows them
@@ -55,7 +64,7 @@ stopped answering.
 
 With *Urban* selected, full screen shows the theme itself rather than the quick menu. The theme
 draws no close button: a **long press on RTN** leaves full screen, which the radio always
-allows. Four places on the screen open a page over it, and a fifth opens the suite's tool:
+allows. Six places on the screen open a page over it, and a seventh opens the suite's tool:
 
 - **The menu button** at the left of the top bar opens the [quick menu](quick-menu.md); so do the
   page keys and TELE, left at their defaults.
@@ -63,14 +72,25 @@ allows. Four places on the screen open a page over it, and a fifth opens the sui
   *MAIN MENU* does; so does SYS, left at its default. The tool opens only while the model is
   disarmed: while it is armed the button is drawn grey and a press does nothing.
 - **The profile row** of the left panel (PID, rate and battery profile) opens *Profile & Tuning*:
-  the in-flight tuning surface, or a note that it is not available now, and the model's battery
+  the in-flight tuning surface, or a note that it is not available now, and, only while the
+  model is disarmed, the model's battery
   profiles, the one in force in green. Pressing a profile makes it the one in force and the page
   stays open, showing whether the change is being sent, was done or failed.
-- **The link bars** in the top bar open the *ELRS* link page: the link quality of receiver and
-  transmitter and the signal of each antenna as bars with their figures, the transmitter power,
-  the skipped frames, the air rate beside the title and the rate floor at the foot. The *Link view
-  switch* on the *Top Bar* page opens the same page while the switch is in the chosen position, in
-  full screen and in the widget's zone alike; in the zone it only shows.
+- **The link bars** in the top bar open the *ELRS* link page: beside the title the air rate and
+  its modulation (*500Hz (LORA)*), then one row per reading, each a bar with its figure -- the link
+  quality of receiver and transmitter (*RQ*, *TQ*), the signal at each receiver antenna (*1RSS*,
+  *2RSS*, the second once one has been seen) and at the transmitter (*TRSS*), the signal-to-noise
+  ratio at the receiver and at the transmitter (*SNR*, `9 / 8dB`) and the transmitter power
+  (*TPWR*) -- and at the foot the least link quality of the flight (*RQ min*). The signal bars show
+  the headroom over the air rate's sensitivity floor, the SNR bar runs from -10 dB to +10 dB, and
+  the bars take the warning steps the *Top Bar* page sets for the link bars; the SNR bar turns
+  amber at 4 dB and red at 0 dB. The *TPWR* bar is the power as a share of the *TX power limit*
+  set on the *Top Bar* page and warns the other way round, amber from 60 % of the limit and red
+  from 85 %: dynamic power raises the power as the link weakens. On an FLRC or FSK rate, which reports no signal-to-noise ratio,
+  *SNR* reads `-`. *RQ min* is the flight record's: the flight in progress, the last flight
+  otherwise, `-` until the model has been armed once. The *Link view switch* on the *Top Bar*
+  page opens the same page while the switch is in the chosen position, in full screen and in the
+  widget's zone alike; in the zone it only shows.
 - **The value rows** of the right panel open *Telemetry*: up to twelve readings as tiles, three to
   a row, chosen on the *Telemetry* page. Each tile shows the reading's name and figure and, under
   it, the least and the most the flight reached, `min .. max`. Those come from the flight record:
@@ -91,6 +111,17 @@ allows. Four places on the screen open a page over it, and a fifth opens the sui
   on connecting, and read *-* until they have been. Like every other place that takes a press, the
   gauge has the radio's frame around it while *Frames on tap areas* is on. A key can open the page
   as well: choose *Theme: Battery* for it on the *Keys* page.
+- **The governor row and the status line** of the left panel open *Status*: the arm state in
+  large letters with what stands in its way under it -- the reasons the flight controller names,
+  *Ready to arm* while there are none. The arm state takes the colours *Arm state colours* on the
+  *Look* page gives it on the flight screen. Beside it the governor, the throttle and the speed
+  controller's live verdict in its level's colour, and under both the *Event log*: what changed
+  on the craft, newest first, each with the radio's time -- arming and disarming, the flight
+  controller connecting and the connection ending, every change of the governor state and of the
+  speed controller's verdict, the last two after *Governor:* and *ESC:*. The log is the widget's
+  own and is kept while the widget runs, across connections; the page shows the newest entries
+  that fit and *No events yet* until the first. A key can open the page as well: choose
+  *Theme: Status* for it on the *Keys* page.
 
 Urban draws these pages, the quick menu and the battery picker in the look of the screen they
 open over, in its colour scheme: a plain page, a title up to a size larger than the top bar's
@@ -118,6 +149,8 @@ setting.
 | Look | Colour scheme | *Light* (default) or *Dark*. |
 | Look | Arm state colours | *Green and red* (default): armed green, disarmed red. *Amber and grey*: armed amber, disarmed in the label colour. |
 | Look | Frames on tap areas | *On* (default) shows the radio's own frame, light blue in its default theme, around every place on the full screen that takes a press. *Off* covers it; the outlines Urban draws itself stay, the choice in force stays green, and a place reached with the rotary encoder still shows the radio's focus frame. |
+| Look | Battery yellow at | The fuel percentage at and below which the battery gauge turns yellow, any whole number from 0 % to 100 %, default 20 %. |
+| Look | Battery red at | The fuel percentage at and below which the gauge turns red, 0 % to 100 %, default 0 %: red only when nothing is left. It cannot be set above *Battery yellow at*, and lowering *Battery yellow at* below it pulls it down too; a stored value above it is drawn as if it were equal. The steps colour the gauge's segments, and a segment is lit only from its own share upward -- the lowest one from a tenth of the gauge where it has ten segments, up to a sixth where it has room for only six -- so a step set below that share colours nothing that shows. The percentage figure keeps its own colour. |
 | Value Rows | Row 1 … Row 5 | The value each row of the right panel shows: cell voltage, voltage, headspeed, current, ESC temperature, MCU temperature, BEC voltage, power, throttle, fuel, capacity used, altitude, link quality, ESC load, ESC status, air rate, rate floor, one of the telemetry sensors listed under [What it reads](#what-it-reads), or nothing. Defaults: cell voltage, headspeed, current, ESC temperature, BEC voltage. |
 | Value Rows | Units beside the values | *Off* (default) gives the width to the figures. |
 | Value Rows | Temperature colours | Colours the ESC and MCU temperature rows. *Off* (default); *Standard*: ESC amber from 90 °C and red from 110 °C, MCU from 75 °C and 90 °C; *Early*: each 10 °C lower. |
@@ -128,14 +161,17 @@ setting.
 | Top Bar | Colour the bars | *Always* (default) colours a good link green; *Only on warning* leaves it neutral until a bar drops to its warning step. |
 | Top Bar | Link good above | Where the link-quality bars turn amber, 50 % to 90 %, default 80 %; they turn red thirty points lower. |
 | Top Bar | Signal good above | Where the signal bars turn amber, 10 % to 25 % of the headroom, default 15 %; they turn red at half of it. |
+| Top Bar | TX power limit | The most the transmitter module sends with, 25 mW to 2000 mW, default 100 mW: the full scale of the *TPWR* bar on the *ELRS* page. Set it to the module's own maximum, or to the limit set in the module. |
 | Top Bar | Link view switch | A switch position that shows the *ELRS* link page while it is held. None by default: the page then opens only by a tap on the link bars. |
-| Keys | Key PAGE >, Key PAGE < | What each page key does in full screen: *Nothing*, *Suite: Quick menu* (default), *Theme: Tuning* (the *Profile & Tuning* page), *Theme: ELRS link* (the *ELRS* link page), *Theme: Telemetry* (the *Telemetry* page), *Theme: Battery* (the *Battery* page), *Suite: Main menu*, *Suite: Flight log* or *Suite: Exit full screen*. *Suite* marks what the dashboard does on every theme, *Theme* a page Urban draws itself. *Suite: Flight log* opens the suite's tool on its *Flight Log* page, as the quick menu's *FLIGHT LOG* does, and does nothing while that page's preview switch is off or the model is armed. |
+| Keys | Key PAGE >, Key PAGE < | What each page key does in full screen: *Nothing*, *Suite: Quick menu* (default), *Theme: Tuning* (the *Profile & Tuning* page), *Theme: ELRS link* (the *ELRS* link page), *Theme: Telemetry* (the *Telemetry* page), *Theme: Battery* (the *Battery* page), *Theme: Status* (the *Status* page), *Suite: Main menu*, *Suite: Flight log* or *Suite: Exit full screen*. *Suite* marks what the dashboard does on every theme, *Theme* a page Urban draws itself. *Suite: Flight log* opens the suite's tool on its *Flight Log* page, as the quick menu's *FLIGHT LOG* does, and does nothing while that page's preview switch is off or the model is armed. |
 | Keys | Key MDL, Key SYS, Key TELE | The same choice for these keys. Defaults: MDL *Nothing*, SYS *Suite: Main menu*, TELE *Suite: Quick menu*. |
 | Telemetry | Tile 1 … Tile 12 | The reading each tile of the *Telemetry* page shows, from the same list as the value rows, or nothing; a tile set to nothing is left out and the others close up. Defaults: voltage, cell voltage, current, capacity used, fuel, headspeed, ESC temperature, MCU temperature, BEC voltage, and tiles 10 to 12 off. The *Units beside the values* and *Temperature colours* settings apply to the tiles as to the rows. |
 
 The cell voltage row turns red below the minimum pack voltage the widget works out for the
 model — the cell count times the flight controller's minimum cell voltage — and the gauge, the
-voltage rows and the status line turn red while the main pack is lost.
+voltage rows and the status line turn red while the main pack is lost. While no cell count is
+known — the flight controller set to detect it and no pack voltage to detect it from — the cell
+voltage row shows `-` and is not coloured, except while the main pack is lost.
 
 The radio draws the frame around every button a script creates, and a script can neither switch
 it off nor change its colour, so *Off* covers it: the button gets square corners and lines in the
@@ -148,7 +184,10 @@ and power (`TQly`, `TPWR`), the air rate's sensitivity floor, whether a second a
 seen, the skipped-frame count (`*Skp`) and the speed controller's live status, and whatever a
 chosen value row or *Telemetry* tile needs (ESC load, ESC status, air rate, rate floor). The
 *Telemetry* page names what its tiles need itself, so the widget reads those only while the page
-is open; the ranges under the record's readings are read from the flight record.
+is open; the ranges under the record's readings are read from the flight record. The *ELRS* link
+page does the same for what only it draws -- the air rate, the transmitter's signal (`TRSS`) and
+both signal-to-noise ratios (`RSNR`, `TSNR`) -- so those are read while the page is open in full
+screen and at no other time.
 
 A row or a tile can also show a telemetry sensor the widget has no reading of its own for, by the
 name the suite's decoder gives it: BEC temperature (`Tbec`), tail speed (`Tspd`), vario (`Var`),
@@ -175,9 +214,6 @@ sensor of that name and a declared name that is absent is still searched for.
 - **Priced only with the accounting fix that settles a free-form theme.** `bin/accounting/budgets.lua`
   carries a `theme.urban` row, measured with that fix; without it `bin/accounting/measure.lua`
   never settles a dashboard drawing this theme.
-- **No colour for a pack that was not full when it was plugged in.** The gauge is green above
-  20 %, yellow at 20 % and below and red at nothing left. Telling a part-used pack apart needs a
-  verdict taken at the connect, and a theme has no pass of its own to take it in.
 - **The transmitter power on the statistics bar is the last reading, not the flight's maximum**:
   the flight record keeps no transmitter power.
 - **The arming-disable names cover bits 0 to 25**, named the same whatever MSP API version the
@@ -191,6 +227,8 @@ sensor of that name and a declared name that is absent is still searched for.
   phase modules load `layout.lua` and `common.lua` from the shipped folder.
 - The *Transmitter power*, *TQ* and skipped-frame cells read `-` on a link that does not report
   those sensors.
+- **In the widget's zone the *ELRS* page shows `-` for the air rate, *TRSS* and *SNR***: the widget
+  reads a page's own readings only while that page is open in full screen.
 
 ## Related
 

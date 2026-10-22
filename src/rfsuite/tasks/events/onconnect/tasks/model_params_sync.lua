@@ -125,6 +125,12 @@ function M.wakeup()
   local session = type(root) == "table" and root.session or nil
   if type(session) ~= "table" then return end
 
+  -- The flags parked here are the previous board's until this read answers. The runner drops this
+  -- module without its reset() once the task is complete, so reset() never clears them between two
+  -- boards; they go as this board's read starts, so a read that fails or is skipped leaves no flags
+  -- and model_name_sync falls back to the radio's own setting instead of the previous craft's.
+  if not requestSent then session.pilotConfig = nil end
+
   -- The READ is not gated on the setting, and the APPLY is. From MSP API 12.09 the reply also
   -- carries the model flags, and one of them decides whether the name task runs at all -- so a
   -- radio-side switch being off must not suppress the read that another consumer depends on.

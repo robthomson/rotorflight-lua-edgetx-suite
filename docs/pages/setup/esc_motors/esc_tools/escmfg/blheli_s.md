@@ -79,6 +79,14 @@ group is always shown.
 - Leaving the page puts the settings, the model, firmware and version back to what the page
   shows before it has read anything, so a visit whose read does not arrive shows the page's
   own initial values rather than the last ESC's.
+- The choices of *Motor Direction*, *Startup Power*, *Motor Timing*, *Demag Compensation* and
+  *Beacon Delay* stand for the numbers BLHeli_S itself stores them as, which start at 1, and
+  the chosen number is what the ESC receives. A number the ESC answers with that has no entry
+  -- a 0 written by an earlier version of this page, say -- is shown as *Unknown (n)*, cannot
+  be chosen, and is written back unchanged by a Save. An ESC saved from an earlier version of
+  this page holds these settings one entry off what was picked there, so check them after
+  updating. Until the ESC has been read, *Motor Direction*, *Startup Power*, *Motor Timing* and
+  *Demag Compensation* show *Unknown (0)*.
 - An unsaved edit is marked below the list, and is lost if the page is left without saving.
 - If the ESC does not answer the write, the page says so and nothing on the screen has been
   confirmed.
@@ -89,7 +97,7 @@ group is always shown.
   same ESC family, for ESCs running Bluejay rather than BLHeli_S.
 - [Saving configuration](../../../../../reference/saving.md) — what the ESC Configurator
   pages read and write, and when a read or a Save is refused.
-- [Rotorflight documentation](https://www.rotorflight.org/docs/) — what each of these
+- [Rotorflight documentation](https://doc.rotorflight.org/) — what each of these
   settings does inside the ESC.
 
 *Documented against RFSuite 0.1.7.*

@@ -17,9 +17,11 @@ local LoadingOverlay = nil
 local ConfirmDialog = nil
 local t = nil
 
+-- Each label is a key and fallback pair in the form the packager translates in place, so an
+-- installed suite shows it in the pilot's language.
 local DSHOT_FIELDS = {
-  { bit = 1, key = "field_rx_lost", default = "RX lost" },
-  { bit = 9, key = "field_rx_set", default = "RX set" }
+  { bit = 1, labelKey = "field_rx_lost", labelFallback = "RX lost" },
+  { bit = 9, labelKey = "field_rx_set", labelFallback = "RX set" }
 }
 
 local ui = {
@@ -353,7 +355,7 @@ function M.build(ctx)
   -- Condition switches
   for i = 1, #DSHOT_FIELDS do
     local def = DSHOT_FIELDS[i]
-    local label = pageText(i18n, def.key, def.default)
+    local label = pageText(i18n, def.labelKey, def.labelFallback)
     
     cursorY = cursorY + Controls.appendRadioSwitch(
       children,
@@ -389,6 +391,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second save beside the running one
+  -- would send the same write again, with a second EEPROM write.
+  if ui.saving then return false end
   local ok, err = queueBeeperConfigWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -403,6 +408,8 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- Nothing is read under a running save; Reload works again once the save has finished.
+  if ui.saving then return true end
   local session = getSession()
   if session then
     ui.dirty = false
@@ -435,6 +442,11 @@ function M.onClose()
   LoadingOverlay = nil
   ConfirmDialog = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

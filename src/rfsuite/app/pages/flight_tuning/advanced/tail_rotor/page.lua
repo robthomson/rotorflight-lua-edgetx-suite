@@ -164,10 +164,13 @@ local function queueRcRead(isAutoReload)
                   ui.runtime.governorReadComplete = false
                 end
                 
-                loadFromSession()
+                -- A pending edit is not read over: M.canSave refuses until it is resolved.
+                if not ui.dirty then
+                  loadFromSession()
+                  ui.runtime.readProfile = tonumber(ui.runtime.lastSessionSignature)
+                end
                 ui.runtime.readPending = false
                 ui.loading = false
-                ui.dirty = false
                 ui.progress = 100
                 ui.runtime.readComplete = readValid
                 if type(ui.runtime.requestRebuild) == "function" then
@@ -176,10 +179,13 @@ local function queueRcRead(isAutoReload)
               end,
               errorHandler = function()
                 ui.runtime.governorReadComplete = false
-                loadFromSession()
+                -- A pending edit is not read over: M.canSave refuses until it is resolved.
+                if not ui.dirty then
+                  loadFromSession()
+                  ui.runtime.readProfile = tonumber(ui.runtime.lastSessionSignature)
+                end
                 ui.runtime.readPending = false
                 ui.loading = false
-                ui.dirty = false
                 ui.progress = 100
                 -- Deliberately allow partial save: PID fields are valid even if governor profile read failed
                 ui.runtime.readComplete = readValid
@@ -189,10 +195,13 @@ local function queueRcRead(isAutoReload)
               end
             })
           else
-            loadFromSession()
+            -- A pending edit is not read over: M.canSave refuses until it is resolved.
+            if not ui.dirty then
+              loadFromSession()
+              ui.runtime.readProfile = tonumber(ui.runtime.lastSessionSignature)
+            end
             ui.runtime.readPending = false
             ui.loading = false
-            ui.dirty = false
             ui.progress = 100
             ui.runtime.readComplete = readValid
             if type(ui.runtime.requestRebuild) == "function" then
@@ -479,10 +488,11 @@ function M.wakeup(ctx)
     ui.runtime.requestRebuild = ctx.requestRebuild
   end
 
+  -- A switch is not read over a pending edit; M.canSave refuses until Reload reads the new profile.
+  -- The signature is taken over only with a read sent under it.
   local signature = buildSessionSignature()
-  if signature ~= ui.runtime.lastSessionSignature then
+  if signature ~= ui.runtime.lastSessionSignature and not ui.dirty and queueRcRead(false) then
     ui.runtime.lastSessionSignature = signature
-    queueRcRead(false)
   end
 end
 
@@ -518,7 +528,8 @@ function M.build(ctx)
   end
 
   local title = ui.baseTitle or getBaseTitle()
-  local profile = getLiveProfile()
+  -- The profile the values on screen were read from; a pending edit keeps it after a switch.
+  local profile = ui.runtime.readProfile or getLiveProfile()
   local displayTitle = string.format("%s #%d", title, profile)
 
   if type(ui.runtime) == "table" and type(ui.runtime.syncHeaderTitle) == "function" then
@@ -611,8 +622,14 @@ function M.build(ctx)
   end
 end
 
+-- The write carries no profile index: the board stores the record in whichever profile is active
+-- when it arrives. A profile switch after the read therefore refuses Save until the page has read
+-- the active profile; the second value is the reason the host shows.
 function M.canSave()
-  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+  if ui.runtime == nil or ui.runtime.readComplete ~= true or ui.runtime.readPending then return false end
+  if ui.runtime.readProfile == nil then return false end
+  if getLiveProfile() ~= ui.runtime.readProfile then return false, "profile_changed" end
+  return true
 end
 
 function M.onSave(ctx)
@@ -629,7 +646,8 @@ function M.onReload(ctx)
     if ui.runtime then
       ui.runtime.governorReadComplete = false
     end
-    queueRcRead(false)
+    local signature = buildSessionSignature()
+    if queueRcRead(false) then ui.runtime.lastSessionSignature = signature end
   end
   return true
 end
@@ -666,4 +684,10 @@ function M.onClose()
 end
 
 M.ui = ui
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
+end
+
 return M

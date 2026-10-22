@@ -56,7 +56,7 @@ procs[#procs + 1] = {
         -- Written out, one call per line, and the repetition is the point.
         --
         -- These were briefly a table walked by a loop, which reads better and does not work: the
-        -- build resolves `t(i18n, "key", "fallback")` where the key and the fallback are LITERAL
+        -- build resolves `t(i18n, <key>, <fallback>)` where the key and the fallback are LITERAL
         -- and leaves anything else alone. Passed as `part[1]`, `part[2]` there is nothing at the
         -- call site to resolve, so the packaged German build showed every one of these in English
         -- -- and shipped that way. The rule is in the header of the file next to this one; a loop

@@ -69,7 +69,7 @@ two groups of settings.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 - [Hobbywing](https://www.hobbywing.com/) -- what each of these settings does inside the ESC,
   and the manual for the model in question.
 

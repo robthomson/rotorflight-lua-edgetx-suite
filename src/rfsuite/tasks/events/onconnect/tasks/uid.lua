@@ -32,6 +32,11 @@ function M.wakeup()
   local session = root.session
   if type(session) ~= "table" then return end
 
+  -- Resolved on THIS link only once this task completes. The flag is the previous link's until
+  -- then: the runner drops this module without its reset() once the task is complete, so reset()
+  -- never clears it between two connects.
+  session.modelPreferencesResolved = nil
+
   -- If MspRuntime has already resolved UID and model preferences, reuse it immediately
   if session.mcu_id and session.mcu_id ~= "" then
     if not ModelPreferences then ModelPreferences = loadModule("lib/model_preferences.lua") end

@@ -41,7 +41,7 @@ version the ESC reported. *Section* switches between three groups of settings.
 | --- | --- |
 | Soft Start Time | How long the ESC takes to bring the motor up on a soft start, 0 s to 60 s in 1 s steps. |
 | Runup Time | The runup time, 0 s to 60 s in 1 s steps. |
-| Bailout Time | The bailout time, 0 s to 100 s in 1 s steps. |
+| Bailout Time | The bailout time, 0 s to 65 s in 1 s steps. The ESC holds it as a 16-bit count of milliseconds, so 65 s is the longest whole second it can store. |
 | Governor P Gain | Proportional gain of the ESC's own governor, 0.30 to 1.80 in steps of 0.01. |
 | Governor I Gain | Integral gain of the ESC's own governor, 1.50 to 2.50 in steps of 0.01. |
 | Startup Sound | Whether the motor plays the startup sound, *On* or *Off*. |
@@ -60,10 +60,11 @@ version the ESC reported. *Section* switches between three groups of settings.
 ## Notes
 
 - Opening this page stores the ESC's current limit in this flight controller's preferences on the radio,
-  as whole amps, where the dashboard reads it to show the current as an ESC load percentage
+  as whole amps and marked as this family's, where the dashboard reads it to show the current
+  as an ESC load percentage and the ESC load announcement speaks it
   ([Power → Preferences](../../../power/preferences.md)). Nothing is asked of the flight
   controller for it -- the value comes out of the parameter block the page reads anyway -- and
-  a visit that finds the same limit writes nothing.
+  a visit that finds the same limit, already marked as this family's, writes nothing.
 - The page opens behind a notice asking for the main and tail blades to be removed. Nothing
   on the page is reachable until that notice is acknowledged.
 - Saving writes the whole parameter block to the ESC, not only the settings that were
@@ -87,7 +88,7 @@ version the ESC reported. *Section* switches between three groups of settings.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 - [Scorpion Power System](https://www.scorpionsystem.com/) -- what each of these settings does
   inside the ESC, and which ESC models support it.
 

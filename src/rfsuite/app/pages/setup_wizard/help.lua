@@ -28,7 +28,7 @@ return function(ctx, proc)
   -- the closing screen and shipped.
   -- Each call carries a literal key AND a literal fallback, and the fallback is ONE string.
   --
-  -- Their pattern is `t(i18n, "key", "fallback")` with both quoted and the bracket straight after.
+  -- Their pattern is `t(i18n, <key>, <fallback>)` with both quoted and the bracket straight after.
   -- A third argument of `nil` fails it, and so does a fallback assembled with `..` -- the pattern
   -- matches the first quoted run and then wants the closing bracket, which a concatenation does
   -- not give it. Both mistakes were made here in one afternoon and both shipped English into the

@@ -48,6 +48,7 @@ local ui = {
   },
   featureEnabled = nil,
   readFailed = false,
+  unsupported = false,
   runtime = newRuntime(),
   loading = false,
   progress = 0,
@@ -115,10 +116,14 @@ local function syncToSession()
   gpsConfig.ublox_use_galileo = ui.config.ublox_use_galileo
 end
 
-local function finishRead(failed)
+-- `unsupported` only for an error reply to GPS_CONFIG: that is how a firmware built without GPS
+-- answers it. A read that timed out, was cleared or could not be parsed says nothing about the
+-- firmware, and is shown as a failed read the pilot can retry with Reload.
+local function finishRead(failed, unsupported)
   ui.runtime.readPending = false
   ui.loading = false
   ui.readFailed = failed == true
+  ui.unsupported = failed == true and unsupported == true
   if not failed then
     ui.dirty = false
     ui.progress = 100
@@ -164,9 +169,9 @@ local function queueGpsRead(isAutoReload)
         ui.featureEnabled = nil
       end
 
-      -- Step 2: GPS_CONFIG. A firmware built without GPS support does not answer this at all,
-      -- which is the one case the page cannot fill in: it has nothing to show and nothing to
-      -- write, so it says so instead of drawing defaults that would be saved as real values.
+      -- Step 2: GPS_CONFIG. A firmware built without GPS support answers this with an error
+      -- reply, which the queue gives up as "refused": the page has nothing to show and nothing
+      -- to write, so it says so instead of drawing defaults that would be saved as real values.
       queue:add({
         command = GpsConfigApi.command,
         simulatorResponse = GpsConfigApi.simulatorResponse,
@@ -187,8 +192,8 @@ local function queueGpsRead(isAutoReload)
           syncToSession()
           finishRead(false)
         end,
-        errorHandler = function()
-          finishRead(true)
+        errorHandler = function(_, reason)
+          finishRead(true, reason == "refused")
         end
       })
     end,
@@ -260,6 +265,7 @@ local function ensureLoaded()
   ui.loaded = true
   ui.dirty = false
   ui.readFailed = false
+  ui.unsupported = false
   ui.featureEnabled = nil
   ui.runtime.lastSessionSignature = buildSessionSignature()
   ui.baseTitle = getBaseTitle()
@@ -368,9 +374,14 @@ function M.build(ctx)
 
   cursorY = cursorY + 10
 
-  if ui.readFailed then
+  if ui.unsupported then
     appendNotice(children, x + 10, cursorY, w - 20,
       pageText(i18n, "unsupported", "This flight controller firmware was built without GPS support."))
+    return
+  end
+
+  if ui.readFailed then
+    Common.appendReadFailedNotice(children, x, cursorY, w)
     return
   end
 
@@ -474,13 +485,23 @@ function M.build(ctx)
   )
 end
 
+-- Save waits for the visit's read: until it has answered, the fields hold the page's starting
+-- values, not the board's. A read that failed is refused in onSave, with the reason.
+function M.canSave()
+  return not (ui.runtime and ui.runtime.readPending)
+end
+
 function M.onSave(ctx)
   if ui.readFailed then
     if ctx and type(ctx.reportSave) == "function" then
-      ctx.reportSave({
-        title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
+      local message = "@i18n(app.read_failed)@"
+      if ui.unsupported then
         message = pageText(ctx and ctx.i18n, "unsupported",
           "This flight controller firmware was built without GPS support.")
+      end
+      ctx.reportSave({
+        title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
+        message = message
       })
     end
     return false
@@ -525,6 +546,7 @@ function M.onClose()
     })
   end
   ui.readFailed = false
+  ui.unsupported = false
   ui.featureEnabled = nil
   Controls = nil
   Common = nil
@@ -534,6 +556,11 @@ function M.onClose()
   LoadingOverlay = nil
   SavePipeline = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

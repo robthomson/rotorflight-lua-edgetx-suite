@@ -97,7 +97,7 @@ local ADJUST_FUNCTIONS = {
   {id = 59, labelKey = "fn_pitch_o", labelFallback = "Pitch O", min = 0, max = 250},
   {id = 60, labelKey = "fn_roll_o", labelFallback = "Roll O", min = 0, max = 250},
   {id = 61, labelKey = "fn_cross_coupling_gain", labelFallback = "Cross Coupling Gain", min = 0, max = 250},
-  {id = 62, labelKey = "fn_cross_coupling_ratio", labelFallback = "Cross Coupling Ratio", min = 0, max = 250},
+  {id = 62, labelKey = "fn_cross_coupling_ratio", labelFallback = "Cross Coupling Ratio", min = 0, max = 200},
   {id = 63, labelKey = "fn_cross_coupling_cutoff", labelFallback = "Cross Coupling Cutoff", min = 0, max = 250},
   {id = 64, labelKey = "fn_acc_trim_pitch", labelFallback = "Acc Trim Pitch", min = -300, max = 300},
   {id = 65, labelKey = "fn_acc_trim_roll", labelFallback = "Acc Trim Roll", min = -300, max = 300},
@@ -334,9 +334,11 @@ local function auxIndexToMember(auxIndex)
     if idx == 2 and map.aux3 ~= nil then return map.aux3 end
   end
 
-  local base = 5
-  if map and map.aux1 ~= nil then base = map.aux1 end
-  return base + idx
+  -- The flight controller reads AUX index idx from its channel 5 + idx (fc/rc_modes.h,
+  -- fc/rc_adjustments.c), and its channel map reorders only its first eight channels (rx/rx.c
+  -- readRxChannels, RX_MAPPABLE_CHANNEL_COUNT), the last three of which are AUX 1 to AUX 3.
+  -- AUX 4 and above therefore always sit on radio channels 9 and up, wherever the map puts AUX 1.
+  return 5 + idx
 end
 
 local function getAuxPulseUs(auxIndex)
@@ -1835,6 +1837,9 @@ function M.build(ctx)
 end
 
 function M.onSave(ctx)
+  -- The header's Save stays reachable over the overlay. A second chain beside the running one
+  -- would write the same slots twice, and the first one's reply would clear the marks under it.
+  if ui.saving then return false end
   local ok, err = queueAdjustmentsWrite(ctx and ctx.requestRebuild, ctx and ctx.i18n, ctx)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -1850,8 +1855,15 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- A read started under a running save would replace the slots the chain has still to send.
+  if ui.saving then return true end
   local session = getSession()
   if session then
+    -- Reload discards every edit, not only the one on screen: from API 12.09 it reads again only
+    -- the selected slot, and a slot left marked here would be written by the next Save.
+    ui.dirtySlots = {}
+    ui.autoDetectEnaSlots = {}
+    ui.autoDetectAdjSlots = {}
     loadFromSession()
     ui.dirty = false
     startLoad(ctx and ctx.requestRebuild)
@@ -1887,6 +1899,11 @@ function M.onClose()
   ConfirmDialog = nil
   ApiVersion = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

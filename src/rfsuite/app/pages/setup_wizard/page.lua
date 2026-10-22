@@ -91,7 +91,7 @@ end
 
 -- The page's own translator, and the one place a non-literal key is not a lost string.
 --
--- Their packager rewrites `pageText(i18n, "key", "fallback")` AT THE CALL SITE, so by the time a
+-- Their packager rewrites `pageText(i18n, <key>, <fallback>)` AT THE CALL SITE, so by the time a
 -- packaged build runs, every caller of this has already been replaced by the locale's own literal
 -- and this body is reached only in an unpackaged tree. That is why the pass-through below is
 -- allowed to hand its own parameters on, and why a call site that does the same thing is not:
@@ -1001,11 +1001,23 @@ local function buildOverviewFooter(children, ctx, x, y, w)
 
   -- Continue, not Start: the first open procedure IS where a first run begins, so one button
   -- serves both and there is no mode to pick.
+  --
+  -- Where the list is cut into pages, the same button turns them first, as Next does on a
+  -- procedure screen: nothing else on the overview moves to the next page, so a procedure on a
+  -- later page would have no Open the pilot can reach.
+  local paging = ui.pageIndex < (ui.pageCount or 1)
   children[#children + 1] = {
     type = "button",
     x = x + btnW + gap, y = y, w = btnW, h = FOOTER_H - 6,
-    text = pageText(i18n, "overview_continue", "Continue"),
-    press = function() wiz.goToProcedure(nextOpenIndex(1), 1) end
+    text = paging and pageText(i18n, "next", "Next") or pageText(i18n, "overview_continue", "Continue"),
+    press = function()
+      if ui.pageIndex < (ui.pageCount or 1) then
+        ui.pageIndex = ui.pageIndex + 1
+        wiz.rebuild()
+        return
+      end
+      wiz.goToProcedure(nextOpenIndex(1), 1)
+    end
   }
 end
 
@@ -1073,6 +1085,8 @@ local function ensureLoaded()
   ui.view = "overview"
   ui.procIndex = 1
   ui.screenIndex = 1
+  -- `M.onClose` leaves `pageIndex` as it was, so a Close from a later page would reopen there.
+  ui.pageIndex = 1
   ui.entered = nil
   ui.loaded = true
   -- Before anything is entered, because the overview derives a status for every procedure and a
@@ -1253,6 +1267,11 @@ function M.onBack(ctx)
   -- confirmation is raised. Nothing is asserted on the way out either: on re-entry every procedure
   -- is derived again, so a repair made outside the assistant is noticed with nobody telling it.
   if ui.view == "run" then
+    wiz.back()
+    return true
+  end
+  -- A later page of the overview turns back a page first; only the first page leaves.
+  if ui.pageIndex > 1 then
     wiz.back()
     return true
   end

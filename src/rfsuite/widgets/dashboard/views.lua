@@ -108,7 +108,7 @@ local CONDITIONS = {}
 function CONDITIONS.previewInflightTuning(widget)
   local previewOn = widget.preferences and widget.preferences.general
     and widget.preferences.general.preview_inflight_tuning == true
-  return previewOn == true and type(widget.state.inflight) == "table"
+  return previewOn == true and widget.state ~= nil and type(widget.state.inflight) == "table"
 end
 
 -- The battery prompt, re-opened: only where the registry has a pack for this model, so a pilot
@@ -134,7 +134,9 @@ function CONDITIONS.batteryPickPending(widget)
   return type(pick) == "table" and pick.pending == true and widget._batteryPickRequest == nil
 end
 
--- The suite's tool, which is opened only while the model is disarmed (tool_host.lua says why).
+-- The suite's tool, which is opened only while the model is disarmed (tool_host.lua says why),
+-- and the quick menu's two writes, ERASE BLACKBOX and BATTERY PROFILE, which the MSP runtime
+-- would drop while the model is armed.
 function CONDITIONS.modelDisarmed(widget)
   return not (widget.state and widget.state.armed == true)
 end

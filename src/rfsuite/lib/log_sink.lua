@@ -303,25 +303,40 @@ end
 -- Write out at most `limit` held lines, or all of them without one. Returns true only when the
 -- write reached the card and more than `limit` lines are still held -- the one case in which the
 -- next tick should not wait for the interval.
-local function flush(limit)
+--
+-- `extra` is one more line written after the held ones -- a fault's own line. It goes through
+-- the same count and the same cap as everything else, so no caller can grow the file past it.
+local function flush(limit, extra)
   if state.capped then return false end
 
   local text, count, seq = pendingText(limit)
+  if extra then
+    text = (text or "") .. extra
+    count = (count or 0) + 1
+  end
   if not text then return false end
   if not openIfNeeded() then return false end
 
   if state.lines + count > MAX_FILE_LINES then
     -- Stop rather than truncate in place: a file that keeps its beginning and says where it
     -- stopped can be read, one that silently drops its middle cannot.
-    if writeFile(state.path, "a", text .. "[----][rfsuite.log][warn] session file cap reached, logging to card stopped\n") then
+    if writeFile(state.path, "a", text .. "[----][rfsuite.log][warn] session file cap reached, logging to card stopped\n") and seq then
       commit(seq)
     end
     state.capped = true
+    -- Nothing will be written to this file again, so the logger stops filling the list. Left
+    -- attached, it would sit at its overflow guard for the rest of the session, held in this Lua
+    -- state for nobody. The session itself stays, capped, so the next tick does not open a new
+    -- file; turning the option off and on again is what starts one.
+    local Log = logModule()
+    if Log and type(Log.detachSink) == "function" then
+      Log.detachSink()
+    end
     return false
   end
 
   if not writeFile(state.path, "a", text) then return false end
-  commit(seq)
+  if seq then commit(seq) end
   state.lines = state.lines + count
 
   local list = ring()
@@ -408,18 +423,18 @@ end
 -- Called from the places that already hold the error string. The forced flush is the point:
 -- what led to the fault is in the ring, and a state that has just raised may not get another
 -- tick.
+--
+-- The session file's cap holds here too. A fault can repeat on every pass, so a write that
+-- bypassed the count would grow the file without bound; past the cap the step file above is
+-- where the fault is recorded.
 function Sink.fault(context, err)
   if not ensureSession() then return end
   Sink.step("fault: " .. tostring(context), true)
-  -- A fault is reason enough to create the file even if nothing else has been written yet.
-  if not openIfNeeded() then return end
 
-  local text, _, seq = pendingText()
-  local line = string.format("[%0.1f][rfsuite.fault][error] %s: %s\n",
-    nowSeconds(), tostring(context), tostring(err))
-  if writeFile(state.path, "a", (text or "") .. line) and seq then
-    commit(seq)
-  end
+  -- A fault is reason enough to create the file even if nothing else has been written yet;
+  -- flush opens it with the extra line alone when nothing is held.
+  flush(nil, string.format("[%0.1f][rfsuite.fault][error] %s: %s\n",
+    nowSeconds(), tostring(context), tostring(err)))
 end
 
 --- True if the error is an EdgeTX CPU-limit kill.

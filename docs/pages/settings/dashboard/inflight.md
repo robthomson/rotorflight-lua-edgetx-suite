@@ -31,7 +31,7 @@ Hidden until *System* → *Settings* → *General* → *Preview* → *In-flight 
 | --- | --- |
 | In-flight tuning on this radio | The master switch. With it off nothing drives on any model. Each model has one of its own on the flight controller page, and both have to be on. Off by default. |
 | Interlock switch | The switch that brings the surface up and makes it live. *None* by default, which leaves the overlay unreachable. |
-| *(the line under it)* | What the setup check found when it last walked the model: *Setup OK*, *Setup not checked*, or the faults it names. A fault refuses the interlock, so the surface does not go live while one stands. |
+| *(the line under it)* | What the setup check found when it last walked the model: *Setup OK*, *Setup not checked*, or the faults it names — or *Reading the radio...* while the page opened from the dashboard is still reading (see Notes). A fault refuses the interlock, so the surface does not go live while one stands. |
 | Set up the model | Writes the two mixer lines, the global variable details and the trim modes this model needs — and only the ones that differ from what the model already carries. It shows what it would remove and what it would add first, and writes nothing until that is confirmed. Where the model already carries all of it, it says so instead of asking. It writes the values as they stand on the page, saved or not. |
 
 *Set up the model* is a comparator, not a rewrite. A channel that already carries nothing but
@@ -87,15 +87,34 @@ the pilot's business.
 - On an ExpressLRS link use the *Wide* switch mode or a full-resolution packet rate. In
   *Hybrid* mode the value and bank channels carry 16 and 6 positions, so several rows and two
   banks miss the windows the flight controller decodes.
-- These settings are saved on the radio. The widget takes a change to them on its own clock,
-  and that clock is held while the model is armed — a change made in the air arrives after
-  landing.
+- These settings are saved on the radio. A save the card refuses shows *Save failed: the
+  settings file could not be written to the SD card*. The widget takes a change to them on its
+  own clock, and that clock is held while the model is armed — a change made in the air arrives
+  after landing.
+- Opened from the dashboard's full screen, the page runs inside the dashboard widget, whose
+  every call the radio stops at an instruction limit. There it reads the radio's switch list
+  (to find the trims) and the model's mixer and input lines (for the variable warnings) a
+  slice per frame instead of all at once. While it reads, the line under the interlock switch,
+  the trim pickers and the variable warnings show *Reading the radio...*, and *Set up the model*
+  answers with the same line; on a model with many logical switches and mixer lines this takes
+  a second or two. *Channels and variables* and *Rows and trims*, when open, draw their header
+  at once and the rows under it a frame or two later, once their notes have been laid out. A
+  variable changed there is not read again (until *Set up the model* has written the model; see
+  below): the page keeps what it found for every variable, and shows the warning for the new
+  one when its field is closed with Enter, Return or the on-screen keypad (on EdgeTX 2.11.5,
+  2.12.0 and later). Changed while the page is still reading, the warning takes the place of
+  *Reading the radio...* as soon as the reading is through. A field left by touching another
+  control, or an older firmware, has the warnings (the variable's use and the variable names)
+  brought up to date the next time the page is laid out. After *Set up the model* the next
+  change of a variable reads the model again, and a reading of the mixer and input lines still
+  running when the model is written starts over. The tool started from the radio's tool menu
+  reads everything when the page opens, as before.
 
 ## Related
 
 - [In-flight tuning overlay](../../../dashboard/inflight-tuning.md) — what the surface does in
   the air.
-- [Rotorflight documentation](https://www.rotorflight.org/docs/) — the flight controller's
+- [Rotorflight documentation](https://doc.rotorflight.org/) — the flight controller's
   adjustment functions, which are what this drives.
 
 *Documented against RFSuite 0.1.7.*

@@ -123,4 +123,4 @@ are in [dashboard themes](../developer/dashboard-themes.md).
 The meaning of an individual condition is the controller manufacturer's and the flight
 controller's, not the suite's. For what the flight controller does with a status word, and for
 which ESC telemetry protocol to set, see the
-[Rotorflight documentation](https://www.rotorflight.org/docs/).
+[Rotorflight documentation](https://doc.rotorflight.org/).

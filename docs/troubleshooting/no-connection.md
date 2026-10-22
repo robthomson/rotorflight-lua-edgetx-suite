@@ -20,8 +20,11 @@ values off the flight controller. This page is the order to check things in.
   MSP gives a link the suite considers up, on which nothing is ever answered. The tool then
   shows *No MSP reply from flight controller (cmd=1)*, and the log carries
   `API_VERSION read failed repeatedly`.
-- **The firmware's MSP API version is one the suite speaks** — 12.08, 12.09 or 12.10. An older
-  board raises the *Unsupported MSP API* dialog rather than staying silent.
+- **The firmware's MSP API version is one the suite speaks** — 12.09 or 12.10, which is
+  Rotorflight 4.6 or later. An older board (Rotorflight 4.5 speaks 12.08) is refused rather than
+  left silent: the tool shows the *Unsupported MSP API* notice with the version the board answered
+  with, the dashboard stays on its start screen with the same message, the service widget's
+  tile names the version, and the suite reads nothing from that board. Updating the flight controller's firmware is the fix.
 
 ## What the suite does when it connects
 

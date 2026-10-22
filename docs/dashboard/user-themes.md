@@ -125,6 +125,6 @@ In governor modes OFF and LIMIT the flight controller keeps no governor state, s
 
 - User themes in `/SCRIPTS/TOOLS/rfsuite.user/` are preserved across suite updates.
 - If a theme includes a `configure.lua` file, its configurable options (such as voltage ranges) are saved in the radio's preferences as the standard values, and a model with per-model settings switched on keeps the values it changes in its own file. See [Settings](../pages/settings/dashboard/settings.md).
-- If a theme breaks while its screen is being drawn, the widget tries three times, then shows *Dashboard error* instead of the dashboard and stops trying. Choosing another theme, changing a setting, reconnecting the flight controller or a flight phase with a screen of its own makes it try again; until then *Dashboard error* stays, which in flight can be until the end of the flight. [Adding a dashboard theme](../developer/dashboard-themes.md) says where the error is logged.
+- If a theme breaks while its screen is being drawn -- an error, or a screen too large for the radio to draw within its instruction limit -- the widget tries three times in a row, then shows *Dashboard error* instead of the dashboard and stops trying. Choosing another theme, changing a setting, reconnecting the flight controller or a flight phase with a screen of its own makes it try again; until then *Dashboard error* stays, which in flight can be until the end of the flight. [Adding a dashboard theme](../developer/dashboard-themes.md) says where the error is logged.
 
 *Documented against RFSuite 0.1.7.*

@@ -152,13 +152,23 @@ local function queueRead()
   if not queue or type(queue.add) ~= "function" then return false, "msp_queue_unavailable" end
 
   ui.runtime.readPending = true
+  ui.runtime.readFailed = false
   ui.loading = true
   rebuild()
 
+  -- A reply that does not parse, a timeout and a cleared request all end the read as failed:
+  -- the page says so and waits for Reload, rather than queueing the same read again from the
+  -- next wakeup and showing "Reading" for as long as the board does not answer. An answer that
+  -- arrives after the page was closed belongs to no visit and is dropped.
+  local runtime, common = ui.runtime, Common
+  local function failRead()
+    if ui.runtime == runtime then common.failPageRead(ui) end
+  end
   queue:add({
     command = PilotConfigApi.command,
     simulatorResponse = PilotConfigApi.simulatorResponse,
     processReply = function(_, buf)
+      if ui.runtime ~= runtime then return end
       local parsed = PilotConfigApi.parse(buf)
       if parsed then
         ui.config.model_id = parsed.model_id or 0
@@ -172,15 +182,15 @@ local function queueRead()
         end
         ui.loaded = true
         ui.dirty = false
+      else
+        return failRead()
       end
       ui.runtime.readPending = false
       ui.loading = false
       rebuild()
     end,
     errorHandler = function()
-      ui.runtime.readPending = false
-      ui.loading = false
-      rebuild()
+      failRead()
     end
   })
   return true, nil
@@ -314,9 +324,16 @@ end
 function M.wakeup(ctx)
   ensureDeps()
   loadPrefs(ctx and ctx.preferences)
-  if not ui.loaded and not ui.runtime.readPending then
+  if not ui.loaded and not ui.runtime.readPending and not ui.runtime.readFailed then
     queueRead()
   end
+end
+
+-- The board half is written from what this visit read. After a failed read -- a Reload whose
+-- read did not come back included, which leaves an earlier edit standing -- the host refuses
+-- the save rather than sending values the flight controller never confirmed.
+function M.canSave()
+  return ui.loaded == true and ui.runtime ~= nil and not ui.runtime.readPending
 end
 
 function M.onReload(ctx)
@@ -383,6 +400,12 @@ function M.build(ctx)
     return
   end
 
+  -- Not the sections: their slots would show zeros the board never sent.
+  if ui.runtime.readFailed then
+    Common.appendReadFailedNotice(children, x, cursorY + 10, w)
+    return
+  end
+
   for i, section in ipairs(SECTIONS) do
     if i > 1 then cursorY = cursorY + 10 end
     local key = section.key
@@ -415,6 +438,11 @@ function M.onClose()
   PilotConfigApi = nil
   LoadingOverlay = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true or prefs.dirty == true
 end
 
 return M

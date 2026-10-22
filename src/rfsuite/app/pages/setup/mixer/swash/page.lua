@@ -278,6 +278,12 @@ local function queueSwashRead(isAutoReload)
   return true, nil
 end
 
+local function copyRecord(record)
+  local copy = {}
+  for k, v in pairs(record) do copy[k] = v end
+  return copy
+end
+
 local function queueSwashWrite()
   if not SavePipeline then SavePipeline = loadModule("tasks/msp/save_pipeline.lua") end
   if not SavePipeline or not MixerConfigApi or not MixerInputPitchApi
@@ -294,22 +300,28 @@ local function queueSwashWrite()
   end
 
   -- Whether this save has to restart the flight controller is decided here, from the difference
-  -- between what was read and what is about to be written -- and it has to be read before the
-  -- assignment below overwrites it. A module-level flag set when the control changed stood here
-  -- instead, and it was only ever cleared on the success path: a chain that died earlier left it
-  -- set, so the next save on this page restarted the board although the swashplate type had not
-  -- been touched.
+  -- between what was read and what is about to be written. A module-level flag set when the
+  -- control changed stood here instead, and it was only ever cleared on the success path: a chain
+  -- that died earlier left it set, so the next save on this page restarted the board although the
+  -- swashplate type had not been touched.
   local swashTypeChanged = ui.apiData.MIXER_CONFIG.swash_type ~= ui.config.swash_type
 
-  ui.apiData.MIXER_CONFIG.swash_type = ui.config.swash_type
-  ui.apiData.MIXER_CONFIG.main_rotor_dir = ui.config.main_rotor_dir
+  -- The save is built on copies, and the records read stay as read until it is done. Written into
+  -- in place, a save that was refused or failed after MSP_SET_MIXER_CONFIG left the new swashplate
+  -- type in the read record, so the next Save compared the new type with itself and did not
+  -- restart the board, although only a restart applies it.
+  local writeConfig = copyRecord(ui.apiData.MIXER_CONFIG)
+  local writePitch = copyRecord(ui.apiData.GET_MIXER_INPUT_PITCH)
+  local writeRoll = copyRecord(ui.apiData.GET_MIXER_INPUT_ROLL)
+  local writeCollective = copyRecord(ui.apiData.GET_MIXER_INPUT_COLLECTIVE)
 
-  ui.apiData.GET_MIXER_INPUT_PITCH.rate_stabilized_pitch =
-    applyDirectionToRate(ui.apiData.GET_MIXER_INPUT_PITCH.rate_stabilized_pitch, ui.config.ele_direction)
-  ui.apiData.GET_MIXER_INPUT_ROLL.rate_stabilized_roll =
-    applyDirectionToRate(ui.apiData.GET_MIXER_INPUT_ROLL.rate_stabilized_roll, ui.config.ail_direction)
-  ui.apiData.GET_MIXER_INPUT_COLLECTIVE.rate_stabilized_collective =
-    applyDirectionToRate(ui.apiData.GET_MIXER_INPUT_COLLECTIVE.rate_stabilized_collective, ui.config.col_direction)
+  writeConfig.swash_type = ui.config.swash_type
+  writeConfig.main_rotor_dir = ui.config.main_rotor_dir
+
+  writePitch.rate_stabilized_pitch = applyDirectionToRate(writePitch.rate_stabilized_pitch, ui.config.ele_direction)
+  writeRoll.rate_stabilized_roll = applyDirectionToRate(writeRoll.rate_stabilized_roll, ui.config.ail_direction)
+  writeCollective.rate_stabilized_collective =
+    applyDirectionToRate(writeCollective.rate_stabilized_collective, ui.config.col_direction)
 
   return SavePipeline.start({
     pageId = "setup_mixer_swash",
@@ -317,22 +329,22 @@ local function queueSwashWrite()
       {
         label = "MSP_SET_MIXER_CONFIG",
         command = MixerConfigApi.writeCommand,
-        payload = MixerConfigApi.buildWritePayload(ui.apiData.MIXER_CONFIG)
+        payload = MixerConfigApi.buildWritePayload(writeConfig)
       },
       {
         label = "MSP_SET_MIXER_INPUT_PITCH",
         command = MixerInputPitchApi.writeCommand,
-        payload = MixerInputPitchApi.buildWritePayload(ui.apiData.GET_MIXER_INPUT_PITCH)
+        payload = MixerInputPitchApi.buildWritePayload(writePitch)
       },
       {
         label = "MSP_SET_MIXER_INPUT_ROLL",
         command = MixerInputRollApi.writeCommand,
-        payload = MixerInputRollApi.buildWritePayload(ui.apiData.GET_MIXER_INPUT_ROLL)
+        payload = MixerInputRollApi.buildWritePayload(writeRoll)
       },
       {
         label = "MSP_SET_MIXER_INPUT_COLLECTIVE",
         command = MixerInputCollectiveApi.writeCommand,
-        payload = MixerInputCollectiveApi.buildWritePayload(ui.apiData.GET_MIXER_INPUT_COLLECTIVE)
+        payload = MixerInputCollectiveApi.buildWritePayload(writeCollective)
       }
     },
     reboot = swashTypeChanged,
@@ -341,7 +353,13 @@ local function queueSwashWrite()
       ui.dirty = false
     end,
     onDone = function(result)
-      if result.status ~= "done" then
+      if result.status == "done" then
+        -- The board holds what was written, and the next save is compared with that.
+        ui.apiData.MIXER_CONFIG = writeConfig
+        ui.apiData.GET_MIXER_INPUT_PITCH = writePitch
+        ui.apiData.GET_MIXER_INPUT_ROLL = writeRoll
+        ui.apiData.GET_MIXER_INPUT_COLLECTIVE = writeCollective
+      else
         ui.dirty = true
       end
       if ui.runtime and type(ui.runtime.requestRebuild) == "function" then
@@ -573,6 +591,11 @@ function M.onClose()
   MixerInputCollectiveApi = nil
   LoadingOverlay = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

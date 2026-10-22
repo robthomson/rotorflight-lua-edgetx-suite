@@ -25,30 +25,32 @@ local FEATURE_BITS = {
   esc_sensor = 27
 }
 
+-- Each label is a key and fallback pair in the form the packager translates in place, so an
+-- installed suite shows it in the pilot's language.
 local FIELD_DEFS = {
-  { key = "log_command", default = "Command", bit = 0 },
-  { key = "log_setpoint", default = "Setpoint", bit = 1 },
-  { key = "log_mixer", default = "Mixer", bit = 2 },
-  { key = "log_pid", default = "PID", bit = 3 },
-  { key = "log_attitude", default = "Attitude", bit = 4 },
-  { key = "log_gyro_raw", default = "Gyro Raw", bit = 5 },
-  { key = "log_gyro", default = "Gyro", bit = 6 },
-  { key = "log_acc", default = "Acc", bit = 7 },
-  { key = "log_mag", default = "Mag", bit = 8 },
-  { key = "log_alt", default = "Alt", bit = 9 },
-  { key = "log_battery", default = "Battery", bit = 10 },
-  { key = "log_rssi", default = "RSSI", bit = 11 },
-  { key = "log_gps", default = "GPS", bit = 12, featureBit = FEATURE_BITS.gps },
-  { key = "log_rpm", default = "RPM", bit = 13 },
-  { key = "log_motors", default = "Motors", bit = 14 },
-  { key = "log_servos", default = "Servos", bit = 15 },
-  { key = "log_vbec", default = "VBEC", bit = 16 },
-  { key = "log_vbus", default = "VBUS", bit = 17 },
-  { key = "log_temps", default = "Temps", bit = 18 },
-  { key = "log_esc", default = "ESC", bit = 19, apiversiongte = { 12, 0, 7 }, featureBit = FEATURE_BITS.esc_sensor },
-  { key = "log_bec", default = "BEC", bit = 20, apiversiongte = { 12, 0, 7 }, featureBit = FEATURE_BITS.esc_sensor },
-  { key = "log_esc2", default = "ESC2", bit = 21, apiversiongte = { 12, 0, 7 }, featureBit = FEATURE_BITS.esc_sensor },
-  { key = "log_governor", default = "Governor", bit = 22, apiversiongte = { 12, 0, 9 }, featureBit = FEATURE_BITS.governor }
+  { labelKey = "log_command", labelFallback = "Command", bit = 0 },
+  { labelKey = "log_setpoint", labelFallback = "Setpoint", bit = 1 },
+  { labelKey = "log_mixer", labelFallback = "Mixer", bit = 2 },
+  { labelKey = "log_pid", labelFallback = "PID", bit = 3 },
+  { labelKey = "log_attitude", labelFallback = "Attitude", bit = 4 },
+  { labelKey = "log_gyro_raw", labelFallback = "Gyro Raw", bit = 5 },
+  { labelKey = "log_gyro", labelFallback = "Gyro", bit = 6 },
+  { labelKey = "log_acc", labelFallback = "Acc", bit = 7 },
+  { labelKey = "log_mag", labelFallback = "Mag", bit = 8 },
+  { labelKey = "log_alt", labelFallback = "Alt", bit = 9 },
+  { labelKey = "log_battery", labelFallback = "Battery", bit = 10 },
+  { labelKey = "log_rssi", labelFallback = "RSSI", bit = 11 },
+  { labelKey = "log_gps", labelFallback = "GPS", bit = 12, featureBit = FEATURE_BITS.gps },
+  { labelKey = "log_rpm", labelFallback = "RPM", bit = 13 },
+  { labelKey = "log_motors", labelFallback = "Motors", bit = 14 },
+  { labelKey = "log_servos", labelFallback = "Servos", bit = 15 },
+  { labelKey = "log_vbec", labelFallback = "VBEC", bit = 16 },
+  { labelKey = "log_vbus", labelFallback = "VBUS", bit = 17 },
+  { labelKey = "log_temps", labelFallback = "Temps", bit = 18 },
+  { labelKey = "log_esc", labelFallback = "ESC", bit = 19, apiversiongte = { 12, 0, 7 }, featureBit = FEATURE_BITS.esc_sensor },
+  { labelKey = "log_bec", labelFallback = "BEC", bit = 20, apiversiongte = { 12, 0, 7 }, featureBit = FEATURE_BITS.esc_sensor },
+  { labelKey = "log_esc2", labelFallback = "ESC2", bit = 21, apiversiongte = { 12, 0, 7 }, featureBit = FEATURE_BITS.esc_sensor },
+  { labelKey = "log_governor", labelFallback = "Governor", bit = 22, apiversiongte = { 12, 0, 9 }, featureBit = FEATURE_BITS.governor }
 }
 
 local ui = {
@@ -477,7 +479,7 @@ function M.build(ctx)
   for i = 1, #FIELD_DEFS do
     local def = FIELD_DEFS[i]
     if supportsField(def, rawApiVersion) then
-      local label = pageText(i18n, def.key, def.default)
+      local label = pageText(i18n, def.labelKey, def.labelFallback)
       cursorY = cursorY + Controls.appendRadioSwitch(
         children, x, cursorY, w,
         label,
@@ -513,6 +515,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second save beside the running one
+  -- would send the same write again, with a second EEPROM write.
+  if ui.saving then return false end
   local ok, err = queueBlackboxWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -527,6 +532,8 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- Nothing is read under a running save; Reload works again once the save has finished.
+  if ui.saving then return true end
   local session = getSession()
   if session then
     ui.dirty = false
@@ -561,6 +568,11 @@ function M.onClose()
   ConfirmDialog = nil
   ApiVersion = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

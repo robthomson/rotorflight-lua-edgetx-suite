@@ -54,7 +54,8 @@ The registry of packs, the editor for it, and the pack the next flight is logged
 *Battery for the next flight* offers the packs that name this craft in their model list, plus
 *None*. The choice is kept for this model, so the same pack is offered again the next time the
 craft is connected; the flight's line records it, and a pack's first flight of a session counts
-one cycle against it.
+one cycle against it. Where a pack was also picked in the dashboard's prompt on connect, the
+later of the two picks is the one the flight is logged against.
 
 *New battery* opens the editor, which takes the whole screen until *Save* or *Cancel* — the tabs
 are not drawn while it is open, because one press on a tab would discard what has been typed.
@@ -66,7 +67,8 @@ and *Delete*. Deleting asks first.
 | --- | --- |
 | Id | The name the flight's line and the model's own choice refer to the pack by. Letters, digits, `_` and `-`; anything else is dropped. It has to be unique, and a new pack is offered the lowest number the registry has free. |
 | Name | What the pack is called on the page and in the flight list. Up to 24 characters. |
-| Capacity | The pack's capacity in mAh, in steps of 100. `0` means it is not recorded and the field is left out of the file. |
+| Capacity | The pack's capacity in whole mAh, as on the Battery page. `0` means it is not recorded and the field is left out of the file. |
+| Cells | The pack's cell count, 1 to 24. Only used to find the pack's battery profile on a flight controller that keeps a cell count per profile (see *The battery profile* below). `0` means it is not recorded and the field is left out of the file. |
 | Models | The craft this pack is offered for, as a comma-separated list of model names. Empty means every model. |
 | Battery profile | The flight controller's battery profile this pack belongs to, 1 to 6. `0` means none is recorded and the field is left out of the file. |
 | Cycles | How many charges the pack has seen. It is counted up by flying, and is editable here for a pack that was already in use before it was entered. |
@@ -110,8 +112,23 @@ the registry entry and from nowhere else:
 1. `profile=1` … `profile=6` on the entry — the pilot saying it outright — is used as it stands.
 2. Otherwise the entry's `cap=` is matched against the capacities the flight controller publishes
    for its own six profiles, and an **exact** match selects that profile.
-3. Where the entry names no profile and no board profile is set to its capacity, **nothing is
-   written**. A guessed profile would move the next flight's low-voltage cut.
+3. Where the flight controller keeps a cell count per profile, the entry's `cells=` has to equal
+   that profile's own cell count as well. This is what tells a 6S and a 12S pack of the same
+   capacity apart. A profile whose cell count is `0` (the flight controller then detects the
+   count from the voltage when the pack is plugged in) names no count, so it is matched only by
+   an entry without `cells=`; a `cells=` that agrees with no profile of that capacity matches
+   none. On a board whose profiles are all left at `0`, leave *Cells* at `0` or use `profile=`.
+4. Where the entry names no profile and no board profile matches, **nothing is written**. A
+   guessed profile would move the next flight's low-voltage cut.
+5. Where more than one board profile still matches — two profiles with the same capacity and an
+   entry without `cells=`, or two with the same capacity and the same cell count — **nothing is
+   written either**, and the log says which profiles tied. `profile=` on the entry settles it,
+   and so does `cells=` where it equals the non-zero cell count of exactly one of them.
+
+Whether the flight controller keeps a cell count per profile is read off its battery
+configuration reply: firmware that does sends the six cell counts after the six capacities.
+Where the reply has no such block, the profiles share one cell count, `cells=` is not used, and
+the first profile set to the pack's capacity is the one selected.
 
 The write is `MSP_SET_BATTERY_PROFILE` followed by the EEPROM write that makes the board apply
 and broadcast the change — the same pair the dashboard's *BATTERY PROFILE* buttons send. It is
@@ -123,6 +140,13 @@ buttons. The log says which of those happened, under the tag `rfsuite.battery_pi
 
 The first five fields are always there: the date and time the craft armed, the model name, the pack
 the flight was flown on, and the armed seconds.
+
+A flight during which the telemetry link was lost is still one line, written at the disarm, when
+the craft is still armed once the link is back: its start is when it armed, its armed seconds
+include the gap, and it is logged against the pack it armed with, counted no more than it would
+have been without the gap. Where
+the craft disarmed while the link was gone, the radio never saw the disarm, so the flight has no
+honest end and no line is written for it.
 
 Everything after them is the flight's own statistics, taken from the record the suite keeps while
 the craft is armed. A field that was never recorded is left empty, so a line may carry all of them,
@@ -174,5 +198,10 @@ the log says which step refused, rather than a line being appended to a file who
 be established. The registry is held to the same standard: a pack's cycle count and the edits made
 under *Batteries* are refused, with a message on the screen, rather than rewriting the file from a
 read that may have been cut short. A registry of the size a pilot keeps is unaffected either way.
+
+A line the card took only part of -- a write that came up short, or power lost during it -- is not
+repaired: it stays in the file as a line of its own, and the next flight's line starts on a new
+line rather than running on from it. The page skips such a fragment where it ends before the
+flight's duration, and otherwise shows it with whatever it holds.
 
 *Documented against RFSuite 0.1.7.*

@@ -57,8 +57,10 @@ local ui = {
     tail_center_trim = 0,
     yaw_direction = 1,
     yaw_calibration = 400,
-    yaw_cw_limit = 125,
-    yaw_ccw_limit = 125
+    -- Centre trim and yaw limits are the flight controller's raw numbers (see rawToField below);
+    -- 1250 is the firmware's default yaw limit.
+    yaw_cw_limit = 1250,
+    yaw_ccw_limit = 1250
   },
   apiData = {},
   runtime = {
@@ -116,8 +118,8 @@ local function loadFromSession()
   ui.config.tail_center_trim = rcConfig.tail_center_trim or 0
   ui.config.yaw_direction = rcConfig.yaw_direction or 1
   ui.config.yaw_calibration = rcConfig.yaw_calibration or 400
-  ui.config.yaw_cw_limit = rcConfig.yaw_cw_limit or 125
-  ui.config.yaw_ccw_limit = rcConfig.yaw_ccw_limit or 125
+  ui.config.yaw_cw_limit = rcConfig.yaw_cw_limit or 1250
+  ui.config.yaw_ccw_limit = rcConfig.yaw_ccw_limit or 1250
 
   if type(rcConfig.apiData) == "table" then
     ui.apiData = rcConfig.apiData
@@ -140,6 +142,32 @@ end
 
 local function isTailMotorizedMode()
   return (tonumber(ui.config.tail_rotor_mode) or 0) >= 1
+end
+
+-- The centre trim and the two yaw limits are held as the flight controller stores them, and only
+-- the fields convert, by the tail mode selected now: a motorised tail shows them in 0.1 % (the raw
+-- number), variable pitch in 0.1 degree (raw * 24 / 100). The firmware applies the same stored
+-- numbers in every tail mode -- the input limits as min/1000 and max/1000, the trim as
+-- tail_center_trim/1000 -- so changing Tail Mode changes how they read, not what Save writes.
+-- Converting them on the way in under the mode read and on the way out under the mode selected
+-- rescaled all three on every mode change: from variable pitch to a motorised tail the default
+-- limits of 1250 went out as 300, the other way as 5208.
+local function rawToField(raw)
+  raw = tonumber(raw) or 0
+  if isTailMotorizedMode() then return raw end
+  return round(raw * 24 / 100)
+end
+
+local function fieldToRaw(value)
+  value = tonumber(value) or 0
+  if isTailMotorizedMode() then return value end
+  return round(value * 100 / 24)
+end
+
+local function copyRecord(record)
+  local copy = {}
+  for k, v in pairs(record) do copy[k] = v end
+  return copy
 end
 
 local function queueTailRead(isAutoReload)
@@ -175,14 +203,7 @@ local function queueTailRead(isAutoReload)
         ui.apiData.MIXER_CONFIG = parsed
         ui.config.tail_rotor_mode = parsed.tail_rotor_mode or 0
         ui.config.tail_motor_idle = parsed.tail_motor_idle or 0
-
-        local isMotor = (parsed.tail_rotor_mode or 0) >= 1
-        if isMotor then
-          ui.config.tail_center_trim = parsed.tail_center_trim or 0
-        else
-          local t_trim = u16_to_s16(parsed.tail_center_trim or 0)
-          ui.config.tail_center_trim = round(t_trim * 24 / 100)
-        end
+        ui.config.tail_center_trim = parsed.tail_center_trim or 0
       end
 
       ui.progress = 50
@@ -204,17 +225,8 @@ local function queueTailRead(isAutoReload)
             local y_cal = u16_to_s16(parsed.rate_stabilized_yaw or 0)
             ui.config.yaw_calibration = math.abs(y_cal)
 
-            local isMotor = (ui.config.tail_rotor_mode or 0) >= 1
-            local cw = u16_to_s16(parsed.min_stabilized_yaw or 0)
-            local ccw = u16_to_s16(parsed.max_stabilized_yaw or 0)
-
-            if isMotor then
-              ui.config.yaw_cw_limit = math.abs(cw)
-              ui.config.yaw_ccw_limit = math.abs(ccw)
-            else
-              ui.config.yaw_cw_limit = math.floor(math.abs(cw) * 24 / 100 + 0.5)
-              ui.config.yaw_ccw_limit = math.floor(math.abs(ccw) * 24 / 100 + 0.5)
-            end
+            ui.config.yaw_cw_limit = math.abs(u16_to_s16(parsed.min_stabilized_yaw or 0))
+            ui.config.yaw_ccw_limit = math.abs(u16_to_s16(parsed.max_stabilized_yaw or 0))
           end
 
           saveToSession()
@@ -263,42 +275,29 @@ local function queueTailWrite()
   end
 
   -- Whether this save has to restart the flight controller is decided here, from the difference
-  -- between what was read and what is about to be written -- and it has to be read before the
-  -- copy-back below overwrites it. A module-level flag set when the control changed stood here
-  -- instead, and it was only ever cleared on the success path: a chain that died earlier left it
-  -- set, so the next save on this page restarted the board although the tail mode had not been
-  -- touched.
+  -- between what was read and what is about to be written. A module-level flag set when the
+  -- control changed stood here instead, and it was only ever cleared on the success path: a chain
+  -- that died earlier left it set, so the next save on this page restarted the board although the
+  -- tail mode had not been touched.
   local tailModeChanged = pConfig.tail_rotor_mode ~= ui.config.tail_rotor_mode
 
-  -- Copy values back
-  pConfig.tail_rotor_mode = ui.config.tail_rotor_mode
+  -- The save is built on copies, and the records read stay as read until it is done. Written into
+  -- in place, a save that was refused or failed after MSP_SET_MIXER_CONFIG left the new tail mode
+  -- in the read record, so the next Save compared the new mode with itself and did not restart
+  -- the board, although only a restart applies it.
+  local writeConfig = copyRecord(pConfig)
+  local writeYaw = copyRecord(pYaw)
 
-  local isMotor = ui.config.tail_rotor_mode >= 1
-  if isMotor then
-    pConfig.tail_motor_idle = ui.config.tail_motor_idle
-    pConfig.tail_center_trim = ui.config.tail_center_trim
-  else
-    local trim_ui = ui.config.tail_center_trim or 0
-    pConfig.tail_center_trim = s16_to_u16(round(trim_ui * 100 / 24))
+  writeConfig.tail_rotor_mode = ui.config.tail_rotor_mode
+  writeConfig.tail_center_trim = ui.config.tail_center_trim or 0
+  if ui.config.tail_rotor_mode >= 1 then
+    writeConfig.tail_motor_idle = ui.config.tail_motor_idle
   end
 
   local yawRate = ui.config.yaw_calibration or 400
-  pYaw.rate_stabilized_yaw = s16_to_u16(yawRate * dirSign(ui.config.yaw_direction))
-
-  local cw_ui = ui.config.yaw_cw_limit or 0
-  local ccw_ui = ui.config.yaw_ccw_limit or 0
-  local cw_raw, ccw_raw
-
-  if isMotor then
-    cw_raw = cw_ui
-    ccw_raw = ccw_ui
-  else
-    cw_raw = math.floor(cw_ui * 100 / 24 + 0.5)
-    ccw_raw = math.floor(ccw_ui * 100 / 24 + 0.5)
-  end
-
-  pYaw.min_stabilized_yaw = s16_to_u16(-math.abs(cw_raw))
-  pYaw.max_stabilized_yaw = s16_to_u16(math.abs(ccw_raw))
+  writeYaw.rate_stabilized_yaw = s16_to_u16(yawRate * dirSign(ui.config.yaw_direction))
+  writeYaw.min_stabilized_yaw = s16_to_u16(-math.abs(ui.config.yaw_cw_limit or 0))
+  writeYaw.max_stabilized_yaw = s16_to_u16(math.abs(ui.config.yaw_ccw_limit or 0))
 
   return SavePipeline.start({
     pageId = "setup_mixer_tail",
@@ -306,12 +305,12 @@ local function queueTailWrite()
       {
         label = "MSP_SET_MIXER_CONFIG",
         command = MixerConfigApi.writeCommand,
-        payload = MixerConfigApi.buildWritePayload(pConfig)
+        payload = MixerConfigApi.buildWritePayload(writeConfig)
       },
       {
         label = "MSP_SET_MIXER_INPUT_YAW",
         command = MixerInputYawApi.writeCommand,
-        payload = MixerInputYawApi.buildWritePayload(pYaw)
+        payload = MixerInputYawApi.buildWritePayload(writeYaw)
       }
     },
     reboot = tailModeChanged,
@@ -320,7 +319,11 @@ local function queueTailWrite()
       ui.dirty = false
     end,
     onDone = function(result)
-      if result.status ~= "done" then
+      if result.status == "done" then
+        -- The board holds what was written, and the next save is compared with that.
+        ui.apiData.MIXER_CONFIG = writeConfig
+        ui.apiData.GET_MIXER_INPUT_YAW = writeYaw
+      else
         ui.dirty = true
       end
       if ui.runtime and type(ui.runtime.requestRebuild) == "function" then
@@ -434,6 +437,10 @@ function M.build(ctx)
     function(newVal)
       if ui.config.tail_rotor_mode ~= newVal then
         ui.config.tail_rotor_mode = newVal
+        -- A tail mode change starts Yaw Calibration from the value that mode is set up with, as
+        -- the Rotorflight Configurator does on the same change: 100 % for a motorised or
+        -- bidirectional tail, 25 % for variable pitch. The direction is kept.
+        ui.config.yaw_calibration = (newVal >= 1) and 1000 or 250
         ui.dirty = true
         if type(ui.runtime.requestRebuild) == "function" then
           ui.runtime.requestRebuild()
@@ -473,14 +480,14 @@ function M.build(ctx)
       min = trimMin,
       max = trimMax,
       step = 1,
-      get = function() return ui.config.tail_center_trim or 0 end,
+      get = function() return rawToField(ui.config.tail_center_trim) end,
       set = function(val)
-        if ui.config.tail_center_trim ~= val then
-          ui.config.tail_center_trim = val
+        if rawToField(ui.config.tail_center_trim) ~= val then
+          ui.config.tail_center_trim = fieldToRaw(val)
           ui.dirty = true
         end
       end,
-      display = function(v) return string.format("%.1f" .. trimSuffix, (tonumber(v) or 0) / 10) end,
+      display = function(v) return string.format("%.1f", (tonumber(v) or 0) / 10) .. trimSuffix end,
       suffix = trimSuffix
     }
   )
@@ -513,14 +520,14 @@ function M.build(ctx)
       min = 0,
       max = limitMax,
       step = 1,
-      get = function() return ui.config.yaw_cw_limit or 125 end,
+      get = function() return rawToField(ui.config.yaw_cw_limit) end,
       set = function(val)
-        if ui.config.yaw_cw_limit ~= val then
-          ui.config.yaw_cw_limit = val
+        if rawToField(ui.config.yaw_cw_limit) ~= val then
+          ui.config.yaw_cw_limit = fieldToRaw(val)
           ui.dirty = true
         end
       end,
-      display = function(v) return string.format("%.1f" .. limitSuffix, (tonumber(v) or 0) / 10) end,
+      display = function(v) return string.format("%.1f", (tonumber(v) or 0) / 10) .. limitSuffix end,
       suffix = limitSuffix
     }
   )
@@ -532,14 +539,14 @@ function M.build(ctx)
       min = 0,
       max = limitMax,
       step = 1,
-      get = function() return ui.config.yaw_ccw_limit or 125 end,
+      get = function() return rawToField(ui.config.yaw_ccw_limit) end,
       set = function(val)
-        if ui.config.yaw_ccw_limit ~= val then
-          ui.config.yaw_ccw_limit = val
+        if rawToField(ui.config.yaw_ccw_limit) ~= val then
+          ui.config.yaw_ccw_limit = fieldToRaw(val)
           ui.dirty = true
         end
       end,
-      display = function(v) return string.format("%.1f" .. limitSuffix, (tonumber(v) or 0) / 10) end,
+      display = function(v) return string.format("%.1f", (tonumber(v) or 0) / 10) .. limitSuffix end,
       suffix = limitSuffix
     }
   )
@@ -612,6 +619,11 @@ function M.onClose()
   MixerInputYawApi = nil
   LoadingOverlay = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

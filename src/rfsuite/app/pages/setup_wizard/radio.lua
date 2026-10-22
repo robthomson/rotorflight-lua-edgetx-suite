@@ -414,10 +414,12 @@ end
 -- This is the difference between a profile switch that lands on 1 / 2 / 3 and one that lands on
 -- 1.18 / 2.00 / 2.82 and is only correct by rounding. The assistant authors the mix, so it knows
 -- the travel and has no reason to approximate it.
+M.TRAVEL = { start = 988, ["end"] = 2012 }
+
 function M.travelRange(swsrc)
   local first = M.firstPositionOf(swsrc)
   if first == nil then return nil end
-  return { start = 988, ["end"] = 2012 }
+  return { start = M.TRAVEL.start, ["end"] = M.TRAVEL["end"] }
 end
 
 -- The value window a mode box gets for a picked position: wide enough to hold the position
@@ -433,9 +435,14 @@ end
 --
 -- So the window is fixed and the CHANNEL is built to match it -- see `writeConditionChannel`. The
 -- two now agree by construction, and a switch wired either way round produces the same result.
+--
+-- The completion criterion compares a board's mode range against this same pair: a range in any
+-- other window is not what this assistant writes, and does not count as done.
+M.CONDITION_WINDOW = { start = 1700, ["end"] = 2100 }
+
 function M.windowFor(swsrc)
   if M.switchPosition(swsrc) == nil then return nil end
-  return { start = 1700, ["end"] = 2100 }
+  return { start = M.CONDITION_WINDOW.start, ["end"] = M.CONDITION_WINDOW["end"] }
 end
 
 -- Reading a channel back out of the model. A single-line mix with a constant weight, no offset,
@@ -534,6 +541,37 @@ function M.clearChannel(channel)
     if not ok then return false end
   end
   return true
+end
+
+-- The other channels whose mixer lines take this input as their source.
+--
+-- The channel writes replace an input at a fixed index, and EdgeTX lets any number of channels
+-- read the same input. On a model laid out by hand, the input this assistant numbers for arming
+-- can be the one another channel's mixer is built on, and replacing it moves that channel too.
+-- Asked here so the write can say so before it happens. `own` is the channel being laid out,
+-- whose own lines are replaced anyway. Returns the channel numbers in order, or nil where the model
+-- cannot be read.
+local MAX_OUTPUT_CHANNELS = 32
+
+function M.inputUsers(inputIndex, own)
+  local mixSource = M.inputSource(inputIndex)
+  if mixSource == nil then return nil end
+  local users = {}
+  for channel = 1, MAX_OUTPUT_CHANNELS do
+    if channel ~= own then
+      local count = M.mixesCount(channel)
+      if count == nil then return nil end
+      for index = 0, count - 1 do
+        local mix = M.getMix(channel, index)
+        -- A line that inverts its source stores it negated; the mixer reads `abs(srcRaw)`.
+        if mix and math.abs(tonumber(mix.source) or 0) == mixSource then
+          users[#users + 1] = channel
+          break
+        end
+      end
+    end
+  end
+  return users
 end
 
 local MULTIPLEX_ADD = 0
@@ -1048,6 +1086,10 @@ function M.setChannelName(channel, name)
     value.ppmCenter = tonumber(current.ppmCenter)
     value.symetrical = tonumber(current.symetrical)
     value.revert = tonumber(current.revert)
+    -- `model.setOutput` clears the whole output before it applies the table, so a field left out
+    -- here is erased rather than left as it was. `getOutput` reports the curve only where one is
+    -- set, in the numbering `setOutput` takes back.
+    value.curve = tonumber(current.curve)
   end
   return pcall(fn, channel - 1, value)
 end

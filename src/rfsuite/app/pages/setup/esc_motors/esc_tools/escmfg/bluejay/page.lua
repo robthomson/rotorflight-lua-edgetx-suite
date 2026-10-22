@@ -325,8 +325,13 @@ end
 -- an ordinary situation has to be a translated key, not a code token. A save before the ESC
 -- has been read is exactly that: an ESC that did not answer, a reply that was refused, or a
 -- page saved before the read came back.
+--
+-- Each entry is a labelKey/labelFallback pair because the packager translates that pair in
+-- place: the fallback an installed suite carries is then already in the pilot's language. A
+-- key that only reaches the lookup at the call is never translated, and the notice would ship
+-- in English in every language.
 local MESSAGE_KEYS = {
-  esc_not_read = { "save_error_not_read", "Read the ESC before saving." }
+  esc_not_read = { labelKey = "save_error_not_read", labelFallback = "Read the ESC before saving." }
 }
 
 local function queueBluejayWrite(requestRebuild)
@@ -577,13 +582,14 @@ function M.onSave(ctx)
   local ok, err = queueBluejayWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
+      local i18n = ctx.i18n
       local mapped = MESSAGE_KEYS[err]
       local message = tostring(err or "MSP write failed")
       if mapped then
-        message = pageText(ctx and ctx.i18n, mapped[1], mapped[2])
+        message = pageText(i18n, mapped.labelKey, mapped.labelFallback)
       end
       ctx.reportSave({
-        title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
+        title = pageText(i18n, "save_error_title", "Error"),
         message = message
       })
     end
@@ -635,7 +641,7 @@ function M.build(ctx)
   end
 
   if ui.loading or ui.saving then
-    local titleText = ui.loading and pageText(i18n, "loading", "Loading") or pageText(i18n, "saving", "Saving")
+    local titleText = ui.loading and pageText(i18n, "loading_title", "Loading") or pageText(i18n, "saving_title", "Saving")
     local msgText = ui.loading and pageText(i18n, "loading_data", "Loading ESC parameters...") or pageText(i18n, "saving_data", "Saving ESC parameters...")
     if LoadingOverlay and type(LoadingOverlay.append) == "function" then
       LoadingOverlay.append(children, {
@@ -713,12 +719,18 @@ function M.build(ctx)
   end
 
   if ui.currentSection == 1 then
+    -- The option values are the bytes the ESC itself stores, which Bluejay numbers from 1
+    -- for direction, timing, demag compensation, beacon delay and power rating
+    -- (bird-sanctuary/bluejay, src/Settings/BluejaySettings.asm). The byte goes to the ESC as
+    -- it is: a 0 is read by
+    -- the firmware as bidirectional and reversed. A byte with no entry in a list is shown as
+    -- unknown and cannot be chosen.
     -- General Settings
     local dirOpts = {
-      { value = 0, label = "Normal" },
-      { value = 1, label = "Reversed" },
-      { value = 2, label = "Forward/Reverse (3D)" },
-      { value = 3, label = "Forward/Reverse (3D) Rev" }
+      { value = 1, label = "Normal" },
+      { value = 2, label = "Reversed" },
+      { value = 3, label = "Forward/Reverse (3D)" },
+      { value = 4, label = "Forward/Reverse (3D) Rev" }
     }
     local motorDirectionLabel = pageText(i18n, "esc_motor_direction", "Motor Direction")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, motorDirectionLabel, dirOpts, ui.config.motor_direction, function(val)
@@ -819,11 +831,11 @@ function M.build(ctx)
   elseif ui.currentSection == 2 then
     -- Brake Settings
     local timingOpts = {
-      { value = 0, label = "0 deg (Low)" },
-      { value = 1, label = "7.5 deg (Medium Low)" },
-      { value = 2, label = "15 deg (Medium)" },
-      { value = 3, label = "22.5 deg (Medium High)" },
-      { value = 4, label = "30 deg (High)" }
+      { value = 1, label = "0 deg (Low)" },
+      { value = 2, label = "7.5 deg (Medium Low)" },
+      { value = 3, label = "15 deg (Medium)" },
+      { value = 4, label = "22.5 deg (Medium High)" },
+      { value = 5, label = "30 deg (High)" }
     }
     local motorTimingLabel = pageText(i18n, "esc_motor_timing", "Motor Timing")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, motorTimingLabel, timingOpts, ui.config.commutation_timing, function(val)
@@ -833,9 +845,9 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     local demagOpts = {
-      { value = 0, label = "Off" },
-      { value = 1, label = "Low" },
-      { value = 2, label = "High" }
+      { value = 1, label = "Off" },
+      { value = 2, label = "Low" },
+      { value = 3, label = "High" }
     }
     local demagCompensation = pageText(i18n, "esc_demag_compensation", "Demag Compensation")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, demagCompensation, demagOpts, ui.config.demag_compensation, function(val)
@@ -921,11 +933,11 @@ function M.build(ctx)
     cursorY = cursorY + rowH
 
     local beaconDelayOpts = {
-      { value = 0, label = "1 minute" },
-      { value = 1, label = "2 minutes" },
-      { value = 2, label = "5 minutes" },
-      { value = 3, label = "10 minutes" },
-      { value = 4, label = "Infinite" }
+      { value = 1, label = "1 minute" },
+      { value = 2, label = "2 minutes" },
+      { value = 3, label = "5 minutes" },
+      { value = 4, label = "10 minutes" },
+      { value = 5, label = "Infinite" }
     }
     local beaconDelayLabel = pageText(i18n, "esc_beacon_delay", "Beacon Delay")
     rowH = Controls.appendComboSelect(children, x, cursorY, w, beaconDelayLabel, beaconDelayOpts, ui.config.beacon_delay, function(val)
@@ -994,8 +1006,8 @@ function M.build(ctx)
 
     if ui.layoutRevision ~= nil and ui.layoutRevision >= 206 then
       local powerOpts = {
-        { value = 0, label = "1S" },
-        { value = 1, label = "2S+" }
+        { value = 1, label = "1S" },
+        { value = 2, label = "2S+" }
       }
       local powerRatingLabel = pageText(i18n, "esc_power_rating", "Power Rating")
       rowH = Controls.appendComboSelect(children, x, cursorY, w, powerRatingLabel, powerOpts, ui.config.power_rating, function(val)
@@ -1117,6 +1129,11 @@ function M.onClose()
   ConfirmDialog = nil
   BluejayInit = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

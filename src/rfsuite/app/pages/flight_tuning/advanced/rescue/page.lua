@@ -88,6 +88,13 @@ local function loadFromSession()
   for k, v in pairs(rcConfig) do
     ui.config[k] = v
   end
+  -- The mode as read, kept apart from the session record, which a save overwrites before the
+  -- board has taken it; and the altitude-hold choice, kept while rescue is switched off and on.
+  -- boardMode is deliberately NOT refreshed when a write fails: the write's errorHandler leaves
+  -- ui.dirty set, so no read reply loads over it and the Altitude hold row stays. Open and Reload
+  -- run this from the session record and then read the board, whose reply sets its own mode.
+  ui.boardMode = tonumber(ui.config.rescue_mode) or 0
+  ui.altHold = ui.boardMode > 1
 end
 
 local function queueRcRead(isAutoReload)
@@ -126,10 +133,13 @@ local function queueRcRead(isAutoReload)
           for k, v in pairs(parsed) do
             rcConfig[k] = v
           end
-          loadFromSession()
+          -- A pending edit is not read over: M.canSave refuses until it is resolved.
+          if not ui.dirty then
+            loadFromSession()
+            ui.runtime.readProfile = tonumber(ui.runtime.lastSessionSignature)
+          end
           ui.runtime.readPending = false
           ui.loading = false
-          ui.dirty = false
           ui.progress = 100
           ui.runtime.readComplete = readValid
           if type(ui.runtime.requestRebuild) == "function" then
@@ -191,6 +201,7 @@ local function queueRcWrite()
         queueRcRead(true)
       end
     end,
+    -- Leaves ui.dirty set on purpose; see loadFromSession, which keeps ui.boardMode through it.
     errorHandler = function() end
   })
 
@@ -362,10 +373,11 @@ function M.wakeup(ctx)
     ui.runtime.requestRebuild = ctx.requestRebuild
   end
 
+  -- A switch is not read over a pending edit; M.canSave refuses until Reload reads the new profile.
+  -- The signature is taken over only with a read sent under it.
   local signature = buildSessionSignature()
-  if signature ~= ui.runtime.lastSessionSignature then
+  if signature ~= ui.runtime.lastSessionSignature and not ui.dirty and queueRcRead(false) then
     ui.runtime.lastSessionSignature = signature
-    queueRcRead(false)
   end
 end
 
@@ -401,7 +413,8 @@ function M.build(ctx)
   end
 
   local title = ui.baseTitle or getBaseTitle()
-  local profile = getLiveProfile()
+  -- The profile the values on screen were read from; a pending edit keeps it after a switch.
+  local profile = ui.runtime.readProfile or getLiveProfile()
   local displayTitle = string.format("%s #%d", title, profile)
 
   if type(ui.runtime) == "table" and type(ui.runtime.syncHeaderTitle) == "function" then
@@ -415,14 +428,28 @@ function M.build(ctx)
   end
 
   -- 1) Rescue Mode Enable (Switch)
-  local modeVal = (tonumber(ui.config.rescue_mode) or 0) == 1
+  -- rescue_mode is OFF = 0, CLIMB = 1, ALT_HOLD = 2 (firmware flight/rescue.h). Rescue is on for
+  -- any mode above 0, and the mode written is composed from both switches as the Configurator
+  -- does, so an altitude-hold profile is never turned into a climbing one by the enable switch.
+  local modeVal = (tonumber(ui.config.rescue_mode) or 0) > 0
   cursorY = cursorY + Controls.appendRadioSwitch(children, x, cursorY, w, pageText(i18n, "mode_enable", "Rescue mode enable"), modeVal, function(nextBool)
-    ui.config.rescue_mode = nextBool and 1 or 0
+    ui.config.rescue_mode = nextBool and (ui.altHold and 2 or 1) or 0
     ui.dirty = true
     if type(ui.runtime.requestRebuild) == "function" then
       ui.runtime.requestRebuild()
     end
   end)
+
+  -- Altitude hold is offered only to a profile that already uses it, as in the Configurator;
+  -- its own settings are not on this page.
+  if modeVal and (ui.boardMode or 0) > 1 then
+    local altHoldLabel = pageText(i18n, "alt_hold", "Altitude hold")
+    cursorY = cursorY + Controls.appendRadioSwitch(children, x, cursorY, w, altHoldLabel, ui.altHold == true, function(nextBool)
+      ui.altHold = nextBool == true
+      ui.config.rescue_mode = ui.altHold and 2 or 1
+      ui.dirty = true
+    end)
+  end
 
   if modeVal then
     -- 2) Flip to upright (Switch)
@@ -433,7 +460,7 @@ function M.build(ctx)
     end)
 
     -- Specs
-    local specCollective = { scale=10, mult=1, min=0, max=1000, suffix="%", decimals=0 }
+    local specCollective = { scale=10, mult=1, min=0, max=1000, step=10, suffix="%", decimals=0 }
     local specTime       = { scale=10, mult=1, min=0, max=250, suffix="s", decimals=1 }
     local specGain       = { scale=1, mult=1, min=0, max=250, suffix="", decimals=0 }
     local specRate       = { scale=1, mult=1, min=5, max=1000, suffix="°/s", decimals=0 }
@@ -483,8 +510,14 @@ function M.build(ctx)
   end
 end
 
+-- The write carries no profile index: the board stores the record in whichever profile is active
+-- when it arrives. A profile switch after the read therefore refuses Save until the page has read
+-- the active profile; the second value is the reason the host shows.
 function M.canSave()
-  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+  if ui.runtime == nil or ui.runtime.readComplete ~= true or ui.runtime.readPending then return false end
+  if ui.runtime.readProfile == nil then return false end
+  if getLiveProfile() ~= ui.runtime.readProfile then return false, "profile_changed" end
+  return true
 end
 
 function M.onSave(ctx)
@@ -498,7 +531,8 @@ function M.onReload(ctx)
   if session then
     loadFromSession()
     ui.dirty = false
-    queueRcRead(false)
+    local signature = buildSessionSignature()
+    if queueRcRead(false) then ui.runtime.lastSessionSignature = signature end
   end
   return true
 end
@@ -521,4 +555,10 @@ function M.onClose()
 end
 
 M.ui = ui
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
+end
+
 return M

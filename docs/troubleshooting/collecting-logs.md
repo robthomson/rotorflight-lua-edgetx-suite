@@ -17,12 +17,15 @@ appear, and then *System* → *Developer* → *Settings*:
 
 | Setting | What to set it to |
 | --- | --- |
-| **Debug Level** | *INFO* for a first report. *DEBUG* for a problem that needs the steps in between, and it is also the level from which the background decoder keeps a record of its own. *TRACE* only when asked — it prints the decoded telemetry payloads and fills a file in seconds. |
+| **Debug Level** | *INFO* for a first report. *DEBUG* for a problem that needs the steps in between, and it is also the level from which the background decoder keeps a record of its own. *TRACE* only when asked — among other lines it adds the raw bytes of every request to and reply from the flight controller. |
 | **Log Session To Card** | On. Nothing is written to the card while this is off, whatever the debug level says. |
 
-**Both are needed, and neither alone does anything.** *Log Session To Card* decides whether the
-card is written at all; the debug level decides what is worth writing. A report asked for with
-one of them set comes back empty.
+**Log Session To Card is the switch that decides whether anything is written.** With it on and
+the debug level left at *OFF*, the configuration tool and the widgets already write their `tool_*`
+and `widget_*` files: errors, warnings and most info lines, the milestones of the connect sequence
+among them, are kept whatever the level says. **The debug level decides how much more goes in.** The background
+decoder's `function_*` files are the exception that needs both, because the decoder only starts
+writing at *DEBUG* or higher.
 
 Switch both back off once the report is sent. The card write is small but it is permanent, and
 *TRACE* left on costs a measurable part of every pass.
@@ -68,7 +71,13 @@ dashboard widget silent 3.0 s, last pass 56 %
 The percentage is what the dashboard's last cycle cost, out of what it is allowed. Near or above
 100 is the reading that explains a dashboard that stopped drawing.
 
-Both need the background decoder on the model and the debug level at *DEBUG* or above.
+A dashboard on another screen page, or behind one of the radio's menu pages, is not reported: the
+radio keeps calling it there, and it keeps doing its work. Off screen, the percentage is that of the
+last cycle in which it was drawn, or 0 if it has not been drawn yet, so a low figure after a stop
+off screen says nothing about what the dashboard's last cycle there cost.
+
+`widget_step.txt` needs nothing but *Log Session To Card*. `function_step.txt` also needs the
+background decoder on the model and the debug level at *DEBUG* or above.
 
 ## What to attach
 
@@ -95,4 +104,9 @@ suite version, so that does not have to be written out separately.
 - **Opening the configuration tool pauses the background decoder** for as long as the tool is
   open, so a gap in `function_*` over that stretch is expected.
 - **A session file stops at 5000 lines** and says so on its last line, rather than dropping its
-  middle. At *TRACE* that is reached in well under a minute.
+  middle. Even at *TRACE* that takes a long session: the connect sequence writes a few hundred
+  lines, and after it a file grows by two lines or more for each request a page sends to the
+  flight controller, and by a line or two every five seconds while the dashboard shows a
+  disarmed model. Nothing is added to it after that, a fault included: a fault after the cap
+  goes only to the `*_step.txt` file, where it stays until the next step replaces it. Turning
+  *Log Session To Card* off and on again starts a new file.

@@ -13,7 +13,7 @@ return function(ctx)
   local i18n = ctx.i18n
 
   local help_p1 = t(i18n, "help_status_p1", "Monitor storage media state and space usage.")
-  local help_p2 = t(i18n, "help_status_p2", "Press * to erase onboard dataflash logs.")
+  local help_p2 = t(i18n, "help_status_p2", "Press * to erase onboard dataflash logs. Asks first; lit only when the board has a dataflash.")
 
   return {
     title = t(i18n, "help_status_title", "Blackbox Status Help"),

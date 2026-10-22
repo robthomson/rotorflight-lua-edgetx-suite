@@ -40,6 +40,6 @@ Read-only while the model is armed.
 ## Related
 
 - [Battery](battery.md) -- the capacity, cell count and cell voltages the readings are measured against.
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

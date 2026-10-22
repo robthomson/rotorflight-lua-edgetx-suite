@@ -33,11 +33,14 @@ Empty places are skipped, so the menu has no gaps: a dash in *Position 1* and *B
 - **An entry chosen twice counts at its first place.** After a save the page shows it there only.
 - **A chosen entry still hides where it does not apply.** The menu asks each entry's own
   condition on top of this list: *IN-FLIGHT TUNING* only while its preview is on, *BATTERY* only
-  with a pack for this model while disarmed, *MAIN MENU* only while disarmed, *FLIGHT LOG*
+  with a pack for this model while disarmed, *ERASE BLACKBOX*, *MAIN MENU* and
+  *BATTERY PROFILE* only while disarmed, *FLIGHT LOG*
   only while the *Flight Log* preview is on and the model is disarmed. Taking an entry
   out here hides it always.
 - **A dash in every place empties the menu.** The header and its close box stay, so full screen
   can still be left.
+- **A save the card refuses** shows *Save failed: the settings file could not be written to the
+  SD card*, and the order is not stored.
 - **Saved with the default order, the page stores nothing**, and the menu then follows whatever
   default a later release brings. Any other order is stored as it stands.
 - **A dashboard theme that draws the quick menu itself** follows this list — Urban does. A theme

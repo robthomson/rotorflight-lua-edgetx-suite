@@ -271,7 +271,9 @@ local function ensureMspInitialized()
     msg.errorHandler = function(_, reason)
       ui.test.total = ui.test.total + 1
       ui.test.retries = ui.test.retries + consumedRetries(msg)
-      if reason == "timeout" then
+      -- A read that no attempt got an answer to. "refused" is not counted here: the board did
+      -- answer, with an error, and Last Error says so.
+      if reason == "max_retries" then
         ui.test.timeouts = ui.test.timeouts + 1
       end
       ui.test.lastError = tostring(reason or "error")

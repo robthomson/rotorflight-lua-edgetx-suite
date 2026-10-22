@@ -53,7 +53,8 @@ function M.save(session)
 	ensureDeps()
 	if not session or not ModelPreferences or type(ModelPreferences.saveByMcuId) ~= "function" then
 		logWarn("save skipped: model_preferences_unavailable")
-		return false, "model_preferences_unavailable"
+		-- The answer saveByMcuId gives when it has no store, so the pages read one token for it.
+		return false, "unavailable"
 	end
 
 	local mcuId = resolveMcuId(session)

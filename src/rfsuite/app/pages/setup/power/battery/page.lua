@@ -30,17 +30,21 @@ local CELL_COUNT_MAX = 24
 local RESERVE_MIN = 15
 local RESERVE_MAX = 60
 
+-- The cell voltage range the board accepts, in 0.01 V: 1.00 to 5.00 V. A NiMH or LiFe pack sits
+-- below a LiPo's 2.50 V, so the fields offer the whole range.
+local CELL_VOLTAGE_MIN = 100
+local CELL_VOLTAGE_MAX = 500
+
 -- The settings firmware with per-profile battery cells keeps once per battery profile, with the
 -- range the board accepts and the default. Every profile is written back on save, so a profile the
--- pilot does not touch keeps the board's own value even where it lies outside the 2.50 V the
--- fields start at (the board takes cell voltages from 1.00 V).
+-- pilot does not touch keeps the board's own value.
 local CELL_FIELDS = { "batteryCellCount", "vbatmincellvoltage", "vbatmaxcellvoltage", "vbatfullcellvoltage", "vbatwarningcellvoltage" }
 local CELL_LIMITS = {
 	batteryCellCount = { CELL_COUNT_MIN, CELL_COUNT_MAX, 0 },
-	vbatmincellvoltage = { 100, 500, 330 },
-	vbatmaxcellvoltage = { 100, 500, 420 },
-	vbatfullcellvoltage = { 100, 500, 410 },
-	vbatwarningcellvoltage = { 100, 500, 350 }
+	vbatmincellvoltage = { CELL_VOLTAGE_MIN, CELL_VOLTAGE_MAX, 330 },
+	vbatmaxcellvoltage = { CELL_VOLTAGE_MIN, CELL_VOLTAGE_MAX, 420 },
+	vbatfullcellvoltage = { CELL_VOLTAGE_MIN, CELL_VOLTAGE_MAX, 410 },
+	vbatwarningcellvoltage = { CELL_VOLTAGE_MIN, CELL_VOLTAGE_MAX, 350 }
 }
 
 local function newRuntime()
@@ -104,6 +108,10 @@ local function clampInt(value, minValue, maxValue, fallback)
 	return n
 end
 
+local function clampCellVoltage(value, fallback)
+	return clampInt(value, CELL_VOLTAGE_MIN, CELL_VOLTAGE_MAX, fallback)
+end
+
 local function ensureRuntime()
 	if type(ui.runtime) ~= "table" then
 		ui.runtime = newRuntime()
@@ -129,15 +137,11 @@ local function pageText(i18n, key, fallback)
 	return fallback
 end
 
-local function pageHelpText(i18n, key, fallback)
-	return pageText(i18n, key, fallback)
-end
-
-local function optionalPageHelpText(i18n, key)
-	local value = pageHelpText(i18n, key, nil)
-	if type(value) ~= "string" or value == "" then return nil end
-	if string.sub(value, 1, 10) == "app.pages." then return nil end
-	return value
+-- The reason after a failed write of the model's file, in words (settings/common.lua). The page
+-- also runs without common.lua when that does not load, and the store's own answer stands in then.
+local function modelSaveReason(i18n, err)
+	if Common and Common.saveFailureReason then return Common.saveFailureReason(i18n, err, true) end
+	return tostring(err or "io")
 end
 
 local function getInlineHelpHandler()
@@ -251,10 +255,12 @@ local function loadFromSession()
 		ui.config.capacities[i + 1] = clampInt(batteryConfig and batteryConfig["batteryCapacity_" .. tostring(i)], CAPACITY_MIN, CAPACITY_MAX, 0)
 	end
 
-	ui.config.vbatmaxcellvoltage = clampInt(batteryConfig and batteryConfig.vbatmaxcellvoltage, 250, 500, 420)
-	ui.config.vbatfullcellvoltage = clampInt(batteryConfig and batteryConfig.vbatfullcellvoltage, 250, 500, 410)
-	ui.config.vbatwarningcellvoltage = clampInt(batteryConfig and batteryConfig.vbatwarningcellvoltage, 250, 500, 350)
-	ui.config.vbatmincellvoltage = clampInt(batteryConfig and batteryConfig.vbatmincellvoltage, 250, 500, 330)
+	-- The board's own values, unclamped: Save sends them back as they were read unless the pilot
+	-- edits one, and an edit is held to the board's range by its setter.
+	ui.config.vbatmaxcellvoltage = tonumber(batteryConfig and batteryConfig.vbatmaxcellvoltage) or 420
+	ui.config.vbatfullcellvoltage = tonumber(batteryConfig and batteryConfig.vbatfullcellvoltage) or 410
+	ui.config.vbatwarningcellvoltage = tonumber(batteryConfig and batteryConfig.vbatwarningcellvoltage) or 350
+	ui.config.vbatmincellvoltage = tonumber(batteryConfig and batteryConfig.vbatmincellvoltage) or 330
 	ui.config.batteryCellCount = clampInt(batteryConfig and batteryConfig.batteryCellCount, CELL_COUNT_MIN, CELL_COUNT_MAX, 0)
 
 	-- Where the board keeps cell count and cell voltages per battery profile, the five fields show
@@ -420,7 +426,7 @@ local function boundCellVoltage(field, value)
 	local warnV = cellValue("vbatwarningcellvoltage")
 	local fullV = cellValue("vbatfullcellvoltage")
 	local maxV = cellValue("vbatmaxcellvoltage")
-	local lo, hi = 250, 500
+	local lo, hi = CELL_VOLTAGE_MIN, CELL_VOLTAGE_MAX
 	if field == "vbatmaxcellvoltage" then
 		lo = math.max(fullV, minV + 1)
 	elseif field == "vbatfullcellvoltage" then
@@ -452,7 +458,7 @@ end
 local function getMaxCellSetter()
 	if ui.runtime.maxCellSet then return ui.runtime.maxCellSet end
 	ui.runtime.maxCellSet = function(value)
-		setCellValue("vbatmaxcellvoltage", boundCellVoltage("vbatmaxcellvoltage", clampInt(value, 250, 500, 420)))
+		setCellValue("vbatmaxcellvoltage", boundCellVoltage("vbatmaxcellvoltage", clampCellVoltage(value, 420)))
 	end
 	return ui.runtime.maxCellSet
 end
@@ -460,7 +466,7 @@ end
 local function getFullCellSetter()
 	if ui.runtime.fullCellSet then return ui.runtime.fullCellSet end
 	ui.runtime.fullCellSet = function(value)
-		setCellValue("vbatfullcellvoltage", boundCellVoltage("vbatfullcellvoltage", clampInt(value, 250, 500, 410)))
+		setCellValue("vbatfullcellvoltage", boundCellVoltage("vbatfullcellvoltage", clampCellVoltage(value, 410)))
 	end
 	return ui.runtime.fullCellSet
 end
@@ -468,7 +474,7 @@ end
 local function getWarnCellSetter()
 	if ui.runtime.warnCellSet then return ui.runtime.warnCellSet end
 	ui.runtime.warnCellSet = function(value)
-		setCellValue("vbatwarningcellvoltage", boundCellVoltage("vbatwarningcellvoltage", clampInt(value, 250, 500, 350)))
+		setCellValue("vbatwarningcellvoltage", boundCellVoltage("vbatwarningcellvoltage", clampCellVoltage(value, 350)))
 	end
 	return ui.runtime.warnCellSet
 end
@@ -476,7 +482,7 @@ end
 local function getMinCellSetter()
 	if ui.runtime.minCellSet then return ui.runtime.minCellSet end
 	ui.runtime.minCellSet = function(value)
-		setCellValue("vbatmincellvoltage", boundCellVoltage("vbatmincellvoltage", clampInt(value, 250, 500, 330)))
+		setCellValue("vbatmincellvoltage", boundCellVoltage("vbatmincellvoltage", clampCellVoltage(value, 330)))
 	end
 	return ui.runtime.minCellSet
 end
@@ -503,7 +509,7 @@ end
 
 local function saveModelPreferences(session)
 	if not PowerModelPreferences or type(PowerModelPreferences.save) ~= "function" then
-		return false, "model_preferences_unavailable"
+		return false, "unavailable"
 	end
 	return PowerModelPreferences.save(session)
 end
@@ -596,10 +602,10 @@ function M.onSave(ctx)
 		end
 	else
 		batteryConfig.batteryCellCount = clampInt(ui.config.batteryCellCount, CELL_COUNT_MIN, CELL_COUNT_MAX, 0)
-		batteryConfig.vbatmaxcellvoltage = clampInt(ui.config.vbatmaxcellvoltage, 250, 500, 420)
-		batteryConfig.vbatfullcellvoltage = clampInt(ui.config.vbatfullcellvoltage, 250, 500, 410)
-		batteryConfig.vbatwarningcellvoltage = clampInt(ui.config.vbatwarningcellvoltage, 250, 500, 350)
-		batteryConfig.vbatmincellvoltage = clampInt(ui.config.vbatmincellvoltage, 250, 500, 330)
+		batteryConfig.vbatmaxcellvoltage = ui.config.vbatmaxcellvoltage
+		batteryConfig.vbatfullcellvoltage = ui.config.vbatfullcellvoltage
+		batteryConfig.vbatwarningcellvoltage = ui.config.vbatwarningcellvoltage
+		batteryConfig.vbatmincellvoltage = ui.config.vbatmincellvoltage
 	end
 	-- Fix for issue #52: only overwrite consumptionWarningPercentage in batteryConfig
 	-- when the pilot explicitly edited the Consumption reserve spinner.
@@ -689,8 +695,9 @@ function M.onSave(ctx)
 			})
 		elseif okMsp and not okPrefs then
 			ctx.reportSave({
-				title = pageText(ctx and ctx.i18n, "warning_title", "Warning"),
-				message = "Battery values sent to FC. Model prefs save failed: " .. tostring(errPrefs or "io")
+				title = pageText(ctx.i18n, "warning_title", "Warning"),
+				message = pageText(ctx.i18n, "model_prefs_failed_message", "Battery values sent to FC; model settings not saved")
+					.. ": " .. modelSaveReason(ctx.i18n, errPrefs)
 			})
 		elseif (not okMsp) and okPrefs then
 			ctx.reportSave({
@@ -699,8 +706,9 @@ function M.onSave(ctx)
 			})
 		else
 			ctx.reportSave({
-				title = pageText(ctx and ctx.i18n, "warning_title", "Warning"),
-				message = "FC write pending and model prefs save failed: " .. tostring(errPrefs or "io")
+				title = pageText(ctx.i18n, "warning_title", "Warning"),
+				message = pageText(ctx.i18n, "pending_model_prefs_failed_message", "FC write pending; model settings not saved")
+					.. ": " .. modelSaveReason(ctx.i18n, errPrefs)
 			})
 		end
 	end
@@ -759,7 +767,7 @@ function M.build(ctx)
 		profileOptions,
 		ui.config.selectedBatteryProfile,
 		getProfileSetter(), {
-			helpText = optionalPageHelpText(i18n, "help_selected_battery"),
+			helpText = pageText(i18n, "help_selected_battery"),
 			helpTitle = pageText(i18n, "selected", "Selected") .. " " .. pageText(i18n, "battery_slot", "Battery"),
 			onHelp = getInlineHelpHandler()
 		})
@@ -772,7 +780,7 @@ function M.build(ctx)
 				max = CAPACITY_MAX,
 				get = function() return ui.config.capacities[i] end,
 				set = getCapacitySetter(i),
-				helpText = optionalPageHelpText(i18n, "help_capacity"),
+				helpText = pageText(i18n, "help_capacity"),
 				helpTitle = label,
 				onHelp = getInlineHelpHandler(),
 				display = function(v) return tostring(v) .. " mAh" end
@@ -791,7 +799,7 @@ function M.build(ctx)
 			profileOptions,
 			editSlot() - 1,
 			getEditProfileSetter(), {
-				helpText = optionalPageHelpText(i18n, "help_edit_battery"),
+				helpText = pageText(i18n, "help_edit_battery"),
 				helpTitle = pageText(i18n, "edit_battery", "Edit Battery"),
 				onHelp = getInlineHelpHandler()
 			})
@@ -799,11 +807,11 @@ function M.build(ctx)
 
 	cursorY = cursorY + Controls.appendNumberField(children, x, cursorY, w,
 		pageText(i18n, "max_cell_voltage", "Max cell voltage"), {
-			min = 250,
-			max = 500,
+			min = CELL_VOLTAGE_MIN,
+			max = CELL_VOLTAGE_MAX,
 			get = function() return cellValue("vbatmaxcellvoltage") end,
 			set = getMaxCellSetter(),
-			helpText = optionalPageHelpText(i18n, "help_max_cell_voltage"),
+			helpText = pageText(i18n, "help_max_cell_voltage"),
 			helpTitle = pageText(i18n, "max_cell_voltage", "Max cell voltage"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return string.format("%.2f V", (tonumber(v) or 0) / 100) end
@@ -811,11 +819,11 @@ function M.build(ctx)
 
 	cursorY = cursorY + Controls.appendNumberField(children, x, cursorY, w,
 		pageText(i18n, "full_cell_voltage", "Full cell voltage"), {
-			min = 250,
-			max = 500,
+			min = CELL_VOLTAGE_MIN,
+			max = CELL_VOLTAGE_MAX,
 			get = function() return cellValue("vbatfullcellvoltage") end,
 			set = getFullCellSetter(),
-			helpText = optionalPageHelpText(i18n, "help_full_cell_voltage"),
+			helpText = pageText(i18n, "help_full_cell_voltage"),
 			helpTitle = pageText(i18n, "full_cell_voltage", "Full cell voltage"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return string.format("%.2f V", (tonumber(v) or 0) / 100) end
@@ -823,11 +831,11 @@ function M.build(ctx)
 
 	cursorY = cursorY + Controls.appendNumberField(children, x, cursorY, w,
 		pageText(i18n, "warn_cell_voltage", "Warn cell voltage"), {
-			min = 250,
-			max = 500,
+			min = CELL_VOLTAGE_MIN,
+			max = CELL_VOLTAGE_MAX,
 			get = function() return cellValue("vbatwarningcellvoltage") end,
 			set = getWarnCellSetter(),
-			helpText = optionalPageHelpText(i18n, "help_warn_cell_voltage"),
+			helpText = pageText(i18n, "help_warn_cell_voltage"),
 			helpTitle = pageText(i18n, "warn_cell_voltage", "Warn cell voltage"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return string.format("%.2f V", (tonumber(v) or 0) / 100) end
@@ -835,11 +843,11 @@ function M.build(ctx)
 
 	cursorY = cursorY + Controls.appendNumberField(children, x, cursorY, w,
 		pageText(i18n, "min_cell_voltage", "Min cell voltage"), {
-			min = 250,
-			max = 500,
+			min = CELL_VOLTAGE_MIN,
+			max = CELL_VOLTAGE_MAX,
 			get = function() return cellValue("vbatmincellvoltage") end,
 			set = getMinCellSetter(),
-			helpText = optionalPageHelpText(i18n, "help_min_cell_voltage"),
+			helpText = pageText(i18n, "help_min_cell_voltage"),
 			helpTitle = pageText(i18n, "min_cell_voltage", "Min cell voltage"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return string.format("%.2f V", (tonumber(v) or 0) / 100) end
@@ -851,7 +859,7 @@ function M.build(ctx)
 			max = CELL_COUNT_MAX,
 			get = function() return cellValue("batteryCellCount") end,
 			set = getCellCountSetter(),
-			helpText = optionalPageHelpText(i18n, "help_cell_count"),
+			helpText = pageText(i18n, "help_cell_count"),
 			helpTitle = pageText(i18n, "cell_count", "Cell count"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return tostring(v) end
@@ -863,7 +871,7 @@ function M.build(ctx)
 			max = RESERVE_MAX,
 			get = function() return ui.config.consumption_warning_percentage end,
 			set = getReserveSetter(),
-			helpText = optionalPageHelpText(i18n, "help_consumption_warning_percentage"),
+			helpText = pageText(i18n, "help_consumption_warning_percentage"),
 			helpTitle = pageText(i18n, "consumption_warning_percentage", "Consumption reserve"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v) return tostring(v) .. "%" end
@@ -908,6 +916,11 @@ function M.onClose()
 	Sensors = nil
 	SmartFuelReserve = nil
 	t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+	return ui.dirty == true
 end
 
 return M

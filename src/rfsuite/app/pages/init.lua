@@ -30,6 +30,7 @@ local entries = {
   settings_audio_events_adjustment_page = definePage("settings/audio/events/adjustment"),
   settings_audio_events_fuel_page = definePage("settings/audio/events/fuel"),
   settings_audio_events_link_page = definePage("settings/audio/events/link"),
+  settings_audio_events_rescue_page = definePage("settings/audio/events/rescue"),
   settings_audio_volume_page = definePage("settings/audio/volume"),
   setup_wizard_page = definePage("setup_wizard"),
   -- The same page, entered under three names. Which name it was opened under is what bounds the
@@ -112,6 +113,7 @@ local entries = {
   diagnostics_validate_sensors_page = definePage("tools/diagnostics/validate_sensors"),
   diagnostics_smartfuel_page = definePage("tools/diagnostics/smartfuel"),
   diagnostics_crsf_sensors_page = definePage("tools/diagnostics/crsf_sensors"),
+  diagnostics_system_status_page = definePage("tools/diagnostics/system_status"),
   diagnostics_session_logs_page = definePage("tools/diagnostics/session_logs"),
   diagnostics_info_page = definePage("tools/diagnostics/info"),
   logs_page = definePage("logs")
@@ -331,6 +333,19 @@ function registry.releaseAll(ctx)
     if closePageModule(menuId, ctx) then
       released = true
     end
+  end
+  -- The dashboard settings page is cached by its file rather than by a menu id (loadPageModule),
+  -- so the walk above never reaches it. Its onClose ends the theme edit scope it set on the
+  -- session, and the session outlives the tool when the tool runs inside the dashboard.
+  for fullPath, module in pairs(loadedByPagePath) do
+    if type(module) == "table" then
+      local hook = module.onClose or module.close or module.closePage or module.destroy
+      if type(hook) == "function" then
+        pcall(hook, ctx or {})
+      end
+      released = true
+    end
+    loadedByPagePath[fullPath] = nil
   end
 
   return released

@@ -45,8 +45,19 @@ local function ensureSensors()
   return Sensors
 end
 
---- Whether the flight controller reports the craft as armed.
-function M.isArmed()
+-- How often the answer to isArmed() has changed, as seen by any caller in this Lua state.
+--
+-- The tool asks isArmed() at the top of every pass (ui/home.lua, isModelArmed), but it wakes a
+-- page only while the craft is NOT armed. So work a page runs across passes -- the ELRS link
+-- sync's parameter walk and its paced writes -- never runs during an armed period, and on the
+-- first pass after the disarm the craft reads as disarmed again: from inside that work, nothing
+-- happened. The count is the witness that something did. Work that must not outlive an arming
+-- notes the count when the pilot says yes and stops when it has moved; both edges count, so a
+-- yes given while armed is spent by the disarm.
+local lastAnswer = nil
+local answerChanges = 0
+
+local function readArmed()
   ensureSensors()
   if not Sensors or type(Sensors.getValue) ~= "function" then
     return false
@@ -80,6 +91,23 @@ function M.isArmed()
     end
   end
   return false
+end
+
+--- Whether the flight controller reports the craft as armed.
+function M.isArmed()
+  local answer = readArmed()
+  -- The first answer is not a change: a count that moved on it would end work that was
+  -- confirmed before anybody had asked.
+  if lastAnswer ~= nil and answer ~= lastAnswer then
+    answerChanges = answerChanges + 1
+  end
+  lastAnswer = answer
+  return answer
+end
+
+--- How many times the answer to isArmed() has changed so far; see the note above readArmed().
+function M.changeCount()
+  return answerChanges
 end
 
 --- Whether the armed state cannot be established AT ALL, as opposed to being established as

@@ -120,8 +120,9 @@ local function getRcConfig(session)
   return session.setup_servos_pwm
 end
 
---- Snapshot one servo's values, once, so a cancel can put them back. Per servo rather than
---- per table, because the paged read brings them one at a time.
+--- Snapshot one servo's values, once per visit, so a cancel can put them back. Per servo rather
+--- than per table, because the paged read brings them one at a time. The snapshot is what the
+--- board holds: it is dropped when a read starts and renewed when a save has completed.
 local function backupOriginalServo(i)
   local s = ui.config.servos and ui.config.servos[i]
   if not s then return end
@@ -141,23 +142,10 @@ local function backupOriginalServo(i)
   }
 end
 
-local function backupOriginalServos()
-  if ui.originalServos then return end
-  ui.originalServos = {}
-  for i, s in pairs(ui.config.servos) do
-    ui.originalServos[i] = {
-      mid = s.mid,
-      min = s.min,
-      max = s.max,
-      scaleNeg = s.scaleNeg,
-      scalePos = s.scalePos,
-      rate = s.rate,
-      speed = s.speed,
-      flags = s.flags,
-      reverse = s.reverse,
-      geometry = s.geometry
-    }
-  end
+--- After a completed save the board holds the saved values, so a later cancel puts those back.
+local function renewOriginalServo(i)
+  if ui.originalServos then ui.originalServos[i] = nil end
+  backupOriginalServo(i)
 end
 
 local function loadFromSession()
@@ -173,9 +161,6 @@ local function loadFromSession()
 
   if type(rcConfig.servos) == "table" then
     ui.config.servos = rcConfig.servos
-    if not ui.originalServos and next(ui.config.servos) ~= nil then
-      backupOriginalServos()
-    end
   end
   if type(rcConfig.apiData) == "table" then
     ui.apiData = rcConfig.apiData
@@ -315,44 +300,59 @@ local function triggerLiveWrite(explicitIdx)
   end
 end
 
+--- Puts servo `i`'s snapshot back on the screen and in the session copy, and sends its centre
+--- live where anything differs, since an override may have sent the edited one. Returns whether
+--- anything was put back.
+local function rollbackServo(i)
+  local orig = ui.originalServos and ui.originalServos[i]
+  local current = ui.config.servos and ui.config.servos[i]
+  if not orig or not current then return false end
+  if current.mid ~= orig.mid or
+     current.min ~= orig.min or
+     current.max ~= orig.max or
+     current.scaleNeg ~= orig.scaleNeg or
+     current.scalePos ~= orig.scalePos or
+     current.rate ~= orig.rate or
+     current.speed ~= orig.speed or
+     current.flags ~= orig.flags or
+     current.reverse ~= orig.reverse or
+     current.geometry ~= orig.geometry then
+
+     current.mid = orig.mid
+     current.min = orig.min
+     current.max = orig.max
+     current.scaleNeg = orig.scaleNeg
+     current.scalePos = orig.scalePos
+     current.rate = orig.rate
+     current.speed = orig.speed
+     current.flags = orig.flags
+     current.reverse = orig.reverse
+     current.geometry = orig.geometry
+
+     triggerLiveWrite(i)
+     return true
+  end
+  return false
+end
+
 local function rollbackChanges()
   if not ui.originalServos then return end
 
   local changed = false
-  for i, orig in pairs(ui.originalServos) do
-    local current = ui.config.servos[i]
-    if current then
-      if current.mid ~= orig.mid or
-         current.min ~= orig.min or
-         current.max ~= orig.max or
-         current.scaleNeg ~= orig.scaleNeg or
-         current.scalePos ~= orig.scalePos or
-         current.rate ~= orig.rate or
-         current.speed ~= orig.speed or
-         current.flags ~= orig.flags or
-         current.reverse ~= orig.reverse or
-         current.geometry ~= orig.geometry then
-
-         current.mid = orig.mid
-         current.min = orig.min
-         current.max = orig.max
-         current.scaleNeg = orig.scaleNeg
-         current.scalePos = orig.scalePos
-         current.rate = orig.rate
-         current.speed = orig.speed
-         current.flags = orig.flags
-         current.reverse = orig.reverse
-         current.geometry = orig.geometry
-
-         triggerLiveWrite(i)
-         changed = true
-      end
-    end
+  for i in pairs(ui.originalServos) do
+    if rollbackServo(i) then changed = true end
   end
 
   if changed then
     saveToSession()
   end
+end
+
+--- Discard on the unsaved-changes question put before another servo is picked: servo `i` goes
+--- back to what the board holds, which is its snapshot.
+local function discardServo(i)
+  if rollbackServo(i) then saveToSession() end
+  ui.dirty = false
 end
 
 --- Whether this firmware has the per-servo read.
@@ -451,6 +451,7 @@ end
 
 --- What the whole-table read used to do at the end of a load, for one servo instead of all.
 local function finishServoLoad(ok)
+  ui.runtime.readComplete = ok == true
   ui.runtime.readPending = false
   ui.loading = false
   ui.dirty = false
@@ -463,6 +464,12 @@ local function finishServoLoad(ok)
 end
 
 local function queueServosRead(isAutoReload)
+  -- Only what this read brings counts as read, and that holds from here on even when no read
+  -- can be queued: the records an earlier visit left in the session copy are still shown while
+  -- it runs, but they are neither drawn as editable nor saved, nor what a cancel puts back.
+  ui.runtime.readComplete = false
+  ui.servoLoaded = {}
+  ui.originalServos = nil
   if ui.runtime.readPending then return false, "read_pending" end
   if not MspRuntime or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
@@ -483,6 +490,9 @@ local function queueServosRead(isAutoReload)
     end
   end
 
+  -- A reply the parser rejects does not stop the chain, but it leaves the read incomplete.
+  local chainOk = true
+
   local MixerConfigApi = loadModule("tasks/msp/api/mixer_config.lua")
   local StatusApi = loadModule("tasks/msp/api/status.lua")
   local SerialConfigApi = loadModule("tasks/msp/api/serial_config.lua")
@@ -497,6 +507,8 @@ local function queueServosRead(isAutoReload)
       if parsed then
         ui.mixerConfig.swash_type = parsed.swash_type or 0
         ui.mixerConfig.tail_rotor_mode = parsed.tail_rotor_mode or 0
+      else
+        chainOk = false
       end
 
       ui.progress = 25
@@ -509,6 +521,8 @@ local function queueServosRead(isAutoReload)
           local parsed = StatusApi.parse(buf)
           if parsed then
             ui.servoCount = parsed.servo_count or 0
+          else
+            chainOk = false
           end
 
           ui.progress = 50
@@ -531,14 +545,17 @@ local function queueServosRead(isAutoReload)
                   end
                 end
                 ui.servoBusEnabled = found
+              else
+                chainOk = false
               end
 
               ui.progress = 75
 
               -- Step 4: the selected servo's own record, where the firmware has that read
               if hasPagedServoReads() then
-                ui.servoLoaded = {}
-                if not queueServoRead(ui.selectedServoIndex, finishServoLoad) then
+                if not queueServoRead(ui.selectedServoIndex, function(ok)
+                  finishServoLoad(ok and chainOk)
+                end) then
                   finishServoLoad(false)
                 end
                 return
@@ -578,12 +595,15 @@ local function queueServosRead(isAutoReload)
 
                       ui.config.servos[i] = s
                       ui.servoLoaded[i] = true
+                      backupOriginalServo(i)
                     end
-                    backupOriginalServos()
+                  else
+                    chainOk = false
                   end
 
                   saveToSession()
 
+                  ui.runtime.readComplete = chainOk
                   ui.runtime.readPending = false
                   ui.loading = false
                   ui.dirty = false
@@ -632,7 +652,13 @@ local function queueServosRead(isAutoReload)
   return true, nil
 end
 
-local function queueServoWrite(servoIdx)
+--- `onDone(ok)` is told once the write is over: true when the flight controller has taken the
+--- record (and the EEPROM write after it), false when either was refused or never answered.
+local function queueServoWrite(servoIdx, onDone)
+  local function done(ok)
+    if type(onDone) == "function" then onDone(ok) end
+  end
+  if not M.canSave() then return false, "read_required" end
   if not MspRuntime or type(MspRuntime.getState) ~= "function" then
     return false, "msp_runtime_unavailable"
   end
@@ -696,25 +722,30 @@ local function queueServoWrite(servoIdx)
           processReply = function()
             ui.loading = false
             ui.dirty = false
+            renewOriginalServo(servoIdx)
             saveToSession()
             if type(ui.runtime.requestRebuild) == "function" then
               ui.runtime.requestRebuild()
             end
+            done(true)
           end,
           errorHandler = function()
             ui.loading = false
             if type(ui.runtime.requestRebuild) == "function" then
               ui.runtime.requestRebuild()
             end
+            done(false)
           end
         })
       else
         ui.loading = false
         ui.dirty = false
+        renewOriginalServo(servoIdx)
         saveToSession()
         if type(ui.runtime.requestRebuild) == "function" then
           ui.runtime.requestRebuild()
         end
+        done(true)
       end
     end,
     errorHandler = function()
@@ -722,10 +753,29 @@ local function queueServoWrite(servoIdx)
       if type(ui.runtime.requestRebuild) == "function" then
         ui.runtime.requestRebuild()
       end
+      done(false)
     end
   })
 
   return true, nil
+end
+
+--- Makes servo `val` the one on screen, reading its record first where it has not been read on
+--- this visit. Only the paged route leaves a servo unread; the whole-table route brought them all.
+local function selectServo(val)
+  ui.selectedServoIndex = val
+  if hasPagedServoReads() and not ui.servoLoaded[val] then
+    ui.loading = true
+    queueServoRead(val, function()
+      ui.loading = false
+      if type(ui.runtime.requestRebuild) == "function" then
+        ui.runtime.requestRebuild()
+      end
+    end)
+  end
+  if type(ui.runtime.requestRebuild) == "function" then
+    ui.runtime.requestRebuild()
+  end
 end
 
 local function ensureLoaded()
@@ -752,7 +802,7 @@ function M.wakeup(ctx)
     queueServosRead(false)
   end
 
-  if ui.inOverride and ui.dirty then
+  if ui.inOverride and ui.dirty and M.canSave() then
     local now = nowSeconds()
     if (now - lastChangeTime) >= liveUpdateInterval then
       lastChangeTime = now
@@ -765,9 +815,50 @@ function M.getHeaderActions()
   return {
     save = true,
     reload = true,
-    star = true,
+    -- Switching the override on waits for this visit's read, as Save does (M.canSave below).
+    -- Switching it off is always offered.
+    star = ui.inOverride or M.canSave(),
     menu = true
   }
+end
+
+-- The page is kept between visits and loadFromSession() puts the last servo records back into
+-- ui.config.servos before this visit's read is even queued, so "a record is there" says nothing
+-- about this visit. readComplete is set only when every reply of this visit's read parsed, and
+-- ui.runtime is dropped by resetPageState() on close. servoLoaded is emptied when a read starts,
+-- so it says that the selected servo's record came from this visit: picking another servo reads
+-- that one outside the chain, and Save writes the selected servo's record.
+-- The PWM servos are the head of the packed total MSP_STATUS reports; with bus servos on, the tail
+-- is the bus channels (app/pages/setup/servos/bus/page.lua carries the two index spaces). Derived
+-- here from the ui fields this visit's read sets, rather than read from a field build() stored,
+-- because canSave() is asked between the pass that finishes the read and the rebuild after it,
+-- where a stored count is still the previous build's -- and a Save in that window would write
+-- index 0, which on a board with no PWM servo is bus servo 1.
+local function pwmServoCount()
+  local totalServoCount = ui.servoCount or 4
+  if totalServoCount < 1 then totalServoCount = 4 end
+
+  local session = getSession()
+  local apiVersion = session and session.apiVersion
+  local isAtLeast1209 = ApiVersion and ApiVersion.isAtLeast and ApiVersion.isAtLeast(apiVersion, {12, 0, 9})
+
+  if ui.servoBusEnabled == true and isAtLeast1209
+    and not (system and system.getVersion and system.getVersion().simulation)
+    and totalServoCount >= 18 then
+    return totalServoCount - 18
+  end
+  return totalServoCount
+end
+
+function M.canSave()
+  -- The header is resolved before the page is built, so on the visit's first ask this has to load
+  -- the API-version module itself: pwmServoCount() reads it, and without it the bus channels
+  -- would not be subtracted and Save offered on a board with no PWM servo.
+  ensureDeps()
+  -- With no PWM servo, servo 0 is a bus servo's record: refuse the write rather than send it.
+  return pwmServoCount() >= 1
+    and ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+    and type(ui.servoLoaded) == "table" and ui.servoLoaded[ui.selectedServoIndex] == true
 end
 
 function M.build(ctx)
@@ -775,6 +866,7 @@ function M.build(ctx)
   ensureLoaded()
 
   ui.runtime.requestRebuild = ctx and ctx.requestRebuild or nil
+  ui.runtime.askUnsavedChanges = ctx and ctx.askUnsavedChanges or nil
 
   local children = ctx.children
   local x = ctx.x
@@ -809,29 +901,20 @@ function M.build(ctx)
     cursorY = cursorY + (Controls.STATIC_SECTION_H or 50)
   end
 
-  local totalServoCount = ui.servoCount or 4
-  if totalServoCount < 1 then totalServoCount = 4 end
-  local pwmServoCount = totalServoCount
-
-  local session = getSession()
-  local apiVersion = session and session.apiVersion
-  local isAtLeast1209 = ApiVersion and ApiVersion.isAtLeast and ApiVersion.isAtLeast(apiVersion, {12, 0, 9})
-
-  if ui.servoBusEnabled == true and isAtLeast1209 and not (system and system.getVersion and system.getVersion().simulation) and totalServoCount > 18 then
-    pwmServoCount = totalServoCount - 18
-  end
-  if pwmServoCount < 1 then pwmServoCount = 4 end
+  -- The count is derived the same way canSave() derives it, from this visit's read (pwmServoCount
+  -- above), so a Save in the pass before the rebuild is refused on the same number this draws.
+  local pwmCount = pwmServoCount()
 
   -- Build Active Servo Combo Selector Options
   local servoOptions = {}
-  for i = 1, pwmServoCount do
+  for i = 1, pwmCount do
     servoOptions[#servoOptions + 1] = {
       label = getServoTitle(i18n, i),
       value = i - 1
     }
   end
 
-  if ui.selectedServoIndex == nil or ui.selectedServoIndex >= pwmServoCount then
+  if ui.selectedServoIndex == nil or ui.selectedServoIndex >= pwmCount then
     ui.selectedServoIndex = 0
   end
 
@@ -841,21 +924,34 @@ function M.build(ctx)
     servoOptions,
     ui.selectedServoIndex,
     function(val)
-      if ui.selectedServoIndex ~= val then
-        ui.selectedServoIndex = val
-        -- Only the paged route leaves a servo unread; the whole-table route brought them all.
-        if hasPagedServoReads() and not ui.servoLoaded[val] then
-          ui.loading = true
-          queueServoRead(val, function()
-            ui.loading = false
-            if type(ui.runtime.requestRebuild) == "function" then
-              ui.runtime.requestRebuild()
-            end
-          end)
+      if ui.selectedServoIndex == val then return end
+      if not ui.dirty then
+        selectServo(val)
+        return
+      end
+      -- Save writes the selected servo only, so an edit left on this one would be dropped by
+      -- the pick. The host's unsaved-changes question comes first: Save stores this servo and
+      -- then picks, Discard puts back what the board holds and then picks, Stay keeps both.
+      -- Where it cannot be asked, the pick does not happen and the selector shows this servo.
+      -- The answers act only on this visit: ui.runtime is dropped on close and made anew on the
+      -- next visit, so a write that completes after the page has gone picks nothing.
+      local from = ui.selectedServoIndex
+      local visit = ui.runtime
+      local asked = type(visit.askUnsavedChanges) == "function" and visit.askUnsavedChanges({
+        message = pageText(i18n, "switch_unsaved_msg",
+          "This servo has changes that are not saved. Picking another servo discards them."),
+        saved = function()
+          if ui.runtime == visit and ui.selectedServoIndex == from then selectServo(val) end
+        end,
+        discard = function()
+          if ui.runtime == visit and ui.selectedServoIndex == from then
+            discardServo(from)
+            selectServo(val)
+          end
         end
-        if type(ui.runtime.requestRebuild) == "function" then
-          ui.runtime.requestRebuild()
-        end
+      })
+      if not asked and type(ui.runtime.requestRebuild) == "function" then
+        ui.runtime.requestRebuild()
       end
     end,
     {
@@ -865,7 +961,7 @@ function M.build(ctx)
 
   -- Everything below is the selected servo's own record, so it is drawn only once that
   -- record has been read. Editing what an unfinished read left behind would write it back.
-  if not ui.servoLoaded[ui.selectedServoIndex] then return end
+  if pwmCount < 1 or not ui.servoLoaded[ui.selectedServoIndex] then return end
 
   local idx = ui.selectedServoIndex
   local s = ui.config.servos[idx]
@@ -1057,7 +1153,19 @@ function M.build(ctx)
 end
 
 function M.onSave(ctx)
-  local ok, err = queueServoWrite(ui.selectedServoIndex)
+  -- `ctx.onSaved` is the host's: the pilot answered Save to the question put before another servo
+  -- was picked, and the pick happens once this servo's record is stored, never before.
+  -- onSave clears the unsaved flag when the write is queued; a write that is not stored puts back
+  -- what the flag was, so an edit stays unsaved and an unedited servo does not become one.
+  local onSaved = ctx and ctx.onSaved
+  local hadEdit = ui.dirty
+  local ok, err = queueServoWrite(ui.selectedServoIndex, function(stored)
+    if not stored then
+      ui.dirty = hadEdit
+    elseif type(onSaved) == "function" then
+      onSaved()
+    end
+  end)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
       ctx.reportSave({
@@ -1085,6 +1193,9 @@ function M.onReload(ctx)
   end
   rollbackChanges()
   ui.dirty = false
+  -- Read the board again, after the rollback's writes: Save waits for a read of this visit, and
+  -- a read that did not succeed is retried from here.
+  queueServosRead(false)
   if type(ui.runtime.requestRebuild) == "function" then
     ui.runtime.requestRebuild()
   end
@@ -1093,6 +1204,7 @@ end
 
 function M.onStar(ctx)
   if not ConfirmDialog then return false end
+  if not ui.inOverride and not M.canSave() then return false end
 
   local i18n = ctx and ctx.i18n
   local title
@@ -1111,6 +1223,8 @@ function M.onStar(ctx)
     message = message,
     onConfirm = function()
       if not ui.inOverride then
+        -- Checked again: Yes comes later than the press, and the page may have closed since.
+        if not M.canSave() then return end
         setOverride(true)
         ui.inOverride = true
       else

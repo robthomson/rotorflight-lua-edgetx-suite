@@ -57,10 +57,12 @@ alone, so Collective keeps the wider range the Configurator offers.
 - Response time, accelerometer limit, setpoint boost and the cyclic ring belong to the same
   rate profile and are on *Advanced* → *Rates (Advanced)*.
 - Which rate profile is being edited is shown in the page heading. It follows the flight
-  controller's active rate profile, so a rate-profile switch reloads the page.
+  controller's active rate profile, so a rate-profile switch reloads the page and redraws its
+  heading and rows. With an edit not yet saved the page is not reloaded and Save is refused
+  until it is -- see [Saving configuration](../../reference/saving.md).
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

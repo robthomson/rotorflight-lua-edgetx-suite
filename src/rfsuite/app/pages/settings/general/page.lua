@@ -156,30 +156,38 @@ end
 --
 -- To put a feature behind this: one entry below, one key in CONFIG_SCHEMA and in the preference
 -- defaults, the matching condition published in onSave, and `visibleWhen` on its menu entry.
+--
+-- The label and the confirmation are each a key and fallback pair in the form the packager
+-- translates in place, and each fallback is one literal on one line: a string joined with `..`
+-- is not one the packager reads, and an installed suite would show it in English.
 
 local PREVIEW_ITEMS = {
   {
     key             = "preview_setup_wizard",
     labelKey        = "preview_setup_wizard",
     labelFallback   = "Setup Assistant",
-    confirmKey      = "preview_confirm_setup_wizard",
-    confirmFallback = "The setup assistant is not finished. Its screens and their order can still change, and it can write to "
-      .. "the flight controller. Check what it has written before you fly. Show it anyway?"
+    confirm         = {
+      labelKey = "preview_confirm_setup_wizard",
+      labelFallback = "The setup assistant is not finished. Its screens and their order can still change, and it can write to the flight controller. Check what it has written before you fly. Show it anyway?"
+    }
   },
   {
     key             = "preview_flight_log",
     labelKey        = "preview_flight_log",
     labelFallback   = "Flight Log",
-    confirmKey      = "preview_confirm_flight_log",
-    confirmFallback = "The flight log is not finished. What it records, and how the page presents it, can still change, and "
-      .. "it keeps a file of its own on the card. Show it anyway?"
+    confirm         = {
+      labelKey = "preview_confirm_flight_log",
+      labelFallback = "The flight log is not finished. What it records, and how the page presents it, can still change, and it keeps a file of its own on the card. Show it anyway?"
+    }
   },
   {
     key             = "preview_inflight_tuning",
     labelKey        = "preview_inflight_tuning",
     labelFallback   = "In-flight tuning",
-    confirmKey      = "preview_confirm_inflight_tuning",
-    confirmFallback = "Not finished, and it changes the flight controller's parameters in flight. Show it anyway?"
+    confirm         = {
+      labelKey = "preview_confirm_inflight_tuning",
+      labelFallback = "Not finished, and it changes the flight controller's parameters in flight. Show it anyway?"
+    }
   },
 }
 
@@ -223,7 +231,7 @@ local function getPreviewSetter(item)
     if dialog then
       local ok, shown = pcall(dialog.show, {
         title = t(pageI18n, item.labelKey, item.labelFallback),
-        message = t(pageI18n, item.confirmKey, item.confirmFallback),
+        message = t(pageI18n, item.confirm.labelKey, item.confirm.labelFallback),
         onConfirm = function() apply(true) end,
         onCancel = function()
           local rebuild = ui.runtime and ui.runtime.requestRebuild
@@ -308,7 +316,7 @@ function M.onSave(ctx)
     end
   else
     if ctx and type(ctx.reportSave) == "function" then
-      ctx.reportSave({ title = t(ctx.i18n, "save_error_title", "Error"), message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. tostring(err or "io") })
+      ctx.reportSave({ title = t(ctx.i18n, "save_error_title", "Error"), message = t(ctx.i18n, "save_error_message", "Save failed") .. ": " .. Common.saveFailureReason(ctx.i18n, err) })
     end
   end
 end
@@ -347,6 +355,11 @@ function M.onClose()
   Common = nil
   t = nil
   pageI18n = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

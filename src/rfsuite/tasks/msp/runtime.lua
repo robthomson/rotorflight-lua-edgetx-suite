@@ -51,6 +51,9 @@ local state = {
     modelPreferencesFile = nil
   },
   unsupportedApi = false,
+  -- The version a refused board answered with. Kept apart from `values.apiVersion`, which the
+  -- refusal resets to "0" like any disconnect, so the notices can still name it.
+  refusedApiVersion = nil,
   limitedApi = false,
   unsupportedApiLogged = false,
   _disconnectHandled = false,
@@ -239,6 +242,7 @@ local function publish()
     end
   end
   session.apiSupported = not state.unsupportedApi
+  session.refusedApiVersion = state.refusedApiVersion
   session.apiLimited = state.limitedApi == true
   session.mspLastError = state.mspLastError
   session.mspLastErrorAt = state.mspLastErrorAt
@@ -255,6 +259,21 @@ local function publish()
   diagnostics.mspLastError = state.mspLastError
   diagnostics.mspLastErrorAt = state.mspLastErrorAt
   diagnostics.mspErrorKind = state.mspErrorKind
+end
+
+-- Whether the session still holds what the last publish() left there, for the two fields that
+-- are written over from outside this file while the link stays up: Events.reset() sets
+-- `session.fblConnected` to false (the tool's close sequence, which goes on ticking this runtime),
+-- and the onconnect `uid` task's reset clears `session.mcu_id` with the model preferences. Neither
+-- touches `diagnostics.fblConnected`, which publish() writes beside it. Every other writer of a
+-- published field outside this file writes a value publish() would not change, or one it leaves
+-- alone itself (`modelPreferences` while it is set).
+local function publishedStateIntact()
+  local root = _G.rfsuite
+  local session = root and root.session
+  local diagnostics = root and root.diagnostics
+  if not session or not diagnostics then return false end
+  return session.mcu_id == state.values.mcuId and session.fblConnected == diagnostics.fblConnected
 end
 
 local function setMspError(message, now, kind)
@@ -380,7 +399,29 @@ local function isSimulator()
   return false
 end
 
-local ARM_SOURCES = { "ARM", "Arm", "ARMF", "ArmF" }
+-- STAT / 5140 is the packed System Status word (CRSF / S.Port name), whose
+-- bit 0 is ARMED like the arming flags' bit 0, so the same bit test applies.
+local ARM_SOURCES = { "ARM", "Arm", "ARMF", "ArmF", "STAT", "5140" }
+
+-- One source's value as the armed state, or nil for a value that says nothing.
+local function armedFromValue(value)
+  if type(value) == "number" then
+    if type(bit32) == "table" and type(bit32.btest) == "function" then
+      return bit32.btest(value, 1)
+    end
+    return value ~= 0
+  end
+  if type(value) == "boolean" then
+    return value
+  end
+  if type(value) == "string" then
+    local n = tonumber(value)
+    if type(n) == "number" then
+      return n ~= 0
+    end
+  end
+  return nil
+end
 
 local function readArmedState()
   if type(getValue) ~= "function" then
@@ -390,25 +431,34 @@ local function readArmedState()
   for i = 1, #ARM_SOURCES do
     local ok, value = pcall(getValue, ARM_SOURCES[i])
     if ok and value ~= nil then
-      if type(value) == "number" then
-        if type(bit32) == "table" and type(bit32.btest) == "function" then
-          return bit32.btest(value, 1)
-        end
-        return value ~= 0
-      end
-      if type(value) == "boolean" then
-        return value
-      end
-      if type(value) == "string" then
-        local n = tonumber(value)
-        if type(n) == "number" then
-          return n ~= 0
-        end
-      end
+      local armed = armedFromValue(value)
+      if armed ~= nil then return armed end
     end
   end
 
   return false
+end
+
+--- The armed state off the same sources tick() reads, and whether it was written since the link
+--- last came back.
+--
+-- getValue() answers a sensor that has stopped arriving with its last value, so once a lost link
+-- returns, tick() reads the armed state the craft had BEFORE the loss until a decoder writes the
+-- sensor again. getSourceValue()'s second result tells the two apart: EdgeTX marks every sensor
+-- old once the link stops streaming, and the next value written clears the mark. Answers
+-- `armed, current`, `current` true only for a reading written since; nil where no source
+-- answers or the radio has no getSourceValue().
+function Runtime.armedReading()
+  local getSrcV = _G.getSourceValue
+  if type(getSrcV) ~= "function" then return nil end
+  for i = 1, #ARM_SOURCES do
+    local ok, value, current = pcall(getSrcV, ARM_SOURCES[i])
+    if ok and value ~= nil then
+      local armed = armedFromValue(value)
+      if armed ~= nil then return armed, current == true end
+    end
+  end
+  return nil
 end
 
 local function isConnected()
@@ -487,6 +537,7 @@ local function enqueueVersionReads(now)
         local fullySupported = isApiVersionSupported(parsed.version)
         local limitedCompatible = (not fullySupported) and isApiVersionLimitedCompatible(parsed.version)
         state.unsupportedApi = not (fullySupported or limitedCompatible)
+        state.refusedApiVersion = state.unsupportedApi and parsed.version or nil
         state.limitedApi = limitedCompatible
         if limitedCompatible then
           log("MSP API version " .. tostring(parsed.version) .. " accepted in limited compatibility mode", "warn")
@@ -834,14 +885,17 @@ function Runtime.tick()
 
   local now = nowSeconds()
   local connected = isConnected()
+  local linkCameUp = false
 
   if state.lastConnected ~= connected then
     state.lastConnected = connected
     if connected then
+      linkCameUp = true
       -- Reset disconnect guard when link becomes active again
       state._disconnectHandled = false
       -- Re-negotiate API support on each fresh connect.
       state.unsupportedApi = false
+      state.refusedApiVersion = nil
       state.limitedApi = false
       state.unsupportedApiLogged = false
       state.mspLastError = nil
@@ -891,8 +945,15 @@ function Runtime.tick()
     enqueueUidRead(now)
   end
 
+  -- The publish below has news on the tick the link came up, whose block above changes published
+  -- values without publishing, and on a tick whose queue had work. Everything else in this file
+  -- that changes one publishes itself or writes the session itself, so on an idle tick it would
+  -- copy what the last publish copied -- unless something outside this file has written over it.
+  local queueWasIdle = state.queue:isProcessed()
   state.queue:processQueue(now)
-  publish()
+  if linkCameUp or not queueWasIdle or not publishedStateIntact() then
+    publish()
+  end
   -- If the version read cleared/marked unsupported during processing, ensure we
   -- treat the runtime as disconnected so callers see a consistent state.
   if state.unsupportedApi then

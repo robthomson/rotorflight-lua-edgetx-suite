@@ -17,7 +17,7 @@
 --
 --   local msp = rfsuite and rfsuite.msp
 --   if msp then
---     local client = msp.register("mywidget", 1)
+--     local client = msp.register("mywidget", 2)
 --     client:request({
 --       command = 101,
 --       simulatorResponse = { 0, 0 },
@@ -33,10 +33,13 @@ end
 local Service = {}
 
 -- The contract the names below are part of. A caller passes the version it was written against
--- to register(), which refuses when this module has moved on -- so a script built for an older
--- surface fails at the door with a reason instead of half-working somewhere further in. It is
+-- to register(), which refuses a version newer than this module's -- so a script built for a
+-- newer surface fails at the door on an older install, with a reason, instead of half-working
+-- somewhere further in. A script written against an older version is still accepted. It is
 -- raised when a published name changes meaning, not when the code behind it moves.
-Service.VERSION = 1
+-- 2: onError's "max_retries" no longer covers a request the board answered with an error reply;
+-- that one now arrives as "refused".
+Service.VERSION = 2
 
 local Runtime = nil
 local runtimeLoadAttempted = false
@@ -104,13 +107,23 @@ Client.__index = Client
 --- Ask the flight controller something.
 --
 -- request.command            MSP command number. Required.
--- request.payload            byte array for a write. Optional.
+-- request.payload            byte array: the data of a write, or the argument of a read. Optional.
 -- request.onReply(buf, info) called with the reply body. info carries command and retries.
--- request.onError(reason)    "timeout", "max_retries", "cancelled" or "aborted" -- the last when
---                            the link dropped and everything in flight was invalidated at once.
+-- request.onError(reason)    one of four reasons:
+--                              "refused"     the retries ran out and the flight controller had
+--                                            answered at least one of them with an error reply;
+--                              "max_retries" the retries ran out and no attempt was answered;
+--                              "cleared"     the request was dropped before it was answered, for
+--                                            example when the link went, the API version is not
+--                                            supported, the model was armed, or release() was
+--                                            called;
+--                              "cancelled"   cancel() dropped it.
 -- request.timeout            seconds to wait for a reply before a retry. Optional.
 -- request.simulatorResponse  byte array the simulator answers with. See status().simulator:
 --                            with no simulator there the radio never sends the request at all.
+-- request.isWrite            true for a write, false for a read. Optional: without it a payload
+--                            means a write, except on a command the firmware reads with an
+--                            argument (MSP_GET_MIXER_INPUT, MSP_GET_SERVO_CONFIG and the like).
 --
 -- Returns a request id, which cancel() takes, or nil and a reason.
 function Client:request(request)
@@ -146,6 +159,10 @@ function Client:request(request)
     timeout = request.timeout,
     simulatorResponse = request.simulatorResponse,
   }
+  -- Passed on only as a boolean: the queue reads any other value as "not a write".
+  if type(request.isWrite) == "boolean" then
+    message.isWrite = request.isWrite
+  end
 
   if type(onReply) == "function" then
     message.processReply = function(msg, buf)
@@ -163,10 +180,9 @@ function Client:request(request)
     if type(onError) ~= "function" then
       return
     end
-    -- clear() with no client calls the handlers with no arguments at all, which is how a
-    -- disconnect or an unsupported API version invalidates everything at once. That case has no
-    -- reason of its own, and it is not a timeout.
-    local ok, err = pcall(onError, reason or "aborted", { command = command })
+    -- The queue's own reason, passed on as it is: the queue gives up with "refused" or
+    -- "max_retries", Queue:clear() says "cleared" and Queue:cancel() "cancelled".
+    local ok, err = pcall(onError, reason, { command = command })
     if not ok then
       log("client " .. tostring(self.id) .. " error handler failed: " .. tostring(err), "warn")
     end

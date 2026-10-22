@@ -34,17 +34,26 @@ EdgeTX gives every script, so it looks the same whichever dashboard theme is sel
 
 | Entry | What it does |
 | --- | --- |
-| **ERASE BLACKBOX** | Asks first, because the erase cannot be undone — see [the erase confirmation](#the-erase-confirmation). Its **ERASE** answer erases the flight controller's blackbox storage, then reads the storage summary back so the dashboard shows the free space it has now, closes the menu and leaves full screen (over a theme that takes full screen: closes the menu and shows the theme again). |
+| **ERASE BLACKBOX** | Asks first, because the erase cannot be undone — see [the erase confirmation](#the-erase-confirmation). Its **ERASE** answer erases the flight controller's blackbox storage, then reads the storage summary back so the dashboard shows the free space it has now, closes the menu and leaves full screen (over a theme that takes full screen: closes the menu and shows the theme again). Only listed while the model is disarmed. |
 | **IN-FLIGHT TUNING** | Opens the in-flight tuning surface at full size. It stays full screen rather than closing. Only listed while the feature is switched on — see below. |
 | **BATTERY** | Brings the battery prompt back, with this model's packs. It stays full screen, the picker taking the menu's place. Only listed while the battery registry has a pack for this model and the model is disarmed. |
 | **MAIN MENU** | Opens the suite's tool, with its whole menu, inside the widget — see [the tool from full screen](#the-tool-from-full-screen). Only listed while the model is disarmed. |
 | **FLIGHT LOG** | Opens the suite's tool inside the widget on its [Flight Log](../pages/tools/flight_log.md) page; the back key there closes it again. Not in the menu as it comes — the pilot adds it on the *Quick Settings* page — and then only listed while the *Flight Log* preview is on and the model is disarmed. |
-| **BATTERY PROFILE** | A grid of the model's battery profiles; pressing one makes it the profile in force. |
+| **BATTERY PROFILE** | A grid of the model's battery profiles; pressing one makes it the profile in force. Only listed while the model is disarmed. |
 
 That is the menu as it comes, *FLIGHT LOG* aside. Which of these entries it shows, and in which order, is the
 pilot's to choose on *System* → *Settings* → *Dashboard* →
 [*Quick Settings*](../pages/settings/dashboard/quick_menu.md). An entry chosen there still hides
 where the table says it is not listed.
+
+**ERASE BLACKBOX and BATTERY PROFILE are not offered while the model is armed** because nothing
+they send would arrive: while the model is armed the suite sends no configuration messages to
+the flight controller and drops the ones waiting, so an erase or a profile change pressed in the
+air would never reach the board. A menu that was already open when the model armed still shows
+what it showed; a press on an entry that is no longer offered does nothing, keeps full screen,
+and draws the menu again without it. The same holds for an **ERASE** answered after the model
+armed, and for a theme that draws these entries itself and asks whether each is offered, as
+Urban does.
 
 **IN-FLIGHT TUNING is a preview entry.** It appears only while *System* → *Settings* →
 *General* → *Preview* → *In-flight tuning* is on **and** the widget is carrying the overlay's
@@ -143,7 +152,7 @@ menus:
 | `title` | The text on the row, already translated. |
 | `kind` | `action` for a single button, `choice` for a title over a grid of options. |
 | `view` | For a `choice` whose options are drawn by a view of their own: that view's id. The menu then draws the row as the single button that opens it (its `after`), and the view draws the options. |
-| `visibleWhen` | The name of a condition that decides whether the row exists at all. Omitted, the row is always there. |
+| `visibleWhen` | The name of a condition that decides whether the row exists at all, and whether a press on it is run (`M.run` refuses a row whose condition does not hold now). Omitted, the row is always there. |
 | `press` | The work an `action` does when it is pressed, and nothing else. Optional: a row whose whole effect is its `after` has none. |
 | `after` | What follows the press, as data: `done`, `openView:<id>`, `closeView`, `exitFullscreen`, `openTool` or `none`. Missing means `none`. The actions are described in [dashboard views](../developer/dashboard-views.md). |
 | `confirm` | Optional, the question the row asks before its press is performed: a table of already-translated strings — `title`, `message`, the optional `detail`, and the labels `confirmLabel` and `cancelLabel`. Present, the press is held until the pilot answers — see [the erase confirmation](#the-erase-confirmation). |
@@ -154,7 +163,9 @@ menus:
 `M.entry(widget, id)` returns one entry of the list, building that one only, and `M.run(widget, entry, option, after,
 report)` runs it: the work — the option's `press` when an option is given, else the entry's —
 and then its `after`, or the `after` given in its place. It is the one place both happen, for
-the menu's own buttons, the picker's and a theme's. `report` is handed to the work: an entry
+the menu's own buttons, the picker's and a theme's. An entry whose `visibleWhen` does not hold
+now is refused there, and again when its question is answered; the options and the `close` of an
+entry that names a `view` are not asked. `report` is handed to the work: an entry
 that sends messages to the flight controller queues them as one chain and reports on the chain
 through it (`"busy"`, then `"ok"` on the last message's reply or `"failed"` on any message's
 error). The menu's own buttons pass none, so what they queue is what they always queued.
@@ -205,7 +216,7 @@ Two things are worth knowing before adding an entry:
 - [In-flight tuning overlay](inflight-tuning.md) — another surface full screen can show.
 - [Flight Log](../pages/tools/flight_log.md) — the battery prompt, and the battery registry it
   offers.
-- [Rotorflight documentation](https://www.rotorflight.org/docs/) — battery profiles and the
+- [Rotorflight documentation](https://doc.rotorflight.org/) — battery profiles and the
   blackbox themselves: what a profile holds, and what the flight controller records.
 
 *Documented against RFSuite 0.1.7.*

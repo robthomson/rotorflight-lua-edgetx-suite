@@ -23,8 +23,8 @@ profiles, adjustments and fuel.
 
 ## Information
 
-Tutorials, documentation, and flight videos can be found on the
-[Rotorflight website](https://www.rotorflight.org/).
+Documentation can be found at [doc.rotorflight.org](https://doc.rotorflight.org/), and tutorials and flight videos
+on the [Rotorflight website](https://www.rotorflight.org/).
 
 The page-by-page reference for the tool itself, what each configuration page does, its
 settings, and when a page is hidden or read-only, is in [docs/](docs/README.md). Every page
@@ -38,8 +38,10 @@ also carries a short explanation in the tool, behind the `?` button in its heade
   `LVGL support required` and stops.
 - A **CRSF link** — Crossfire or ELRS. RFSuite carries MSP over CRSF telemetry, and that is
   the only transport it implements. S.Port and F.Port receivers are not supported.
-- Rotorflight firmware speaking **MSP API version 12.08, 12.09 or 12.10**. Pages that need a
-  newer API than the connected flight controller reports are hidden automatically.
+- Rotorflight firmware speaking **MSP API version 12.09 or 12.10** — Rotorflight 4.6 or
+  later. A flight controller on an older firmware (Rotorflight 4.5 speaks 12.08) is refused on
+  connect with a notice naming its version. Pages that need a newer API than the connected
+  flight controller reports are hidden automatically.
 
 
 ## Installation
@@ -192,9 +194,9 @@ Rotorflight is an open-source community project. Anybody can join in and help to
 * [reporting](https://github.com/rotorflight?tab=repositories) bugs and issues, and suggesting improvements
 * testing new software versions, new features and fixes; and providing feedback
 * participating in discussions on new features
-* create or update content on the [Website](https://www.rotorflight.org)
-* [contributing](https://www.rotorflight.org/docs/Contributing/intro) to the software development - fixing bugs, implementing new features and improvements
-* [translating](https://www.rotorflight.org/docs/Contributing/intro#translations) Rotorflight into a new language, or helping to maintain an existing translation
+* create or update content on the [documentation website](https://doc.rotorflight.org/contributing/editing-the-docs/)
+* [contributing](https://doc.rotorflight.org/contributing/) to the software development - fixing bugs, implementing new features and improvements
+* [translating](https://doc.rotorflight.org/contributing/) Rotorflight into a new language, or helping to maintain an existing translation
 
 
 ## Origins

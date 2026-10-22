@@ -27,19 +27,29 @@ local function loadSensors()
   return (Sensors ~= false and Sensors) or nil
 end
 
+--- The profile the telemetry reports right now (1-indexed), or nil without a reading.
+-- Unlike the two getters below this never falls back to the session, whose value is set at
+-- connect and does not follow a switch made on the transmitter.
+-- profileType: "pid" / "pid_profile" (default) or "rate" / "rate_profile".
+function M.getLive(profileType)
+  local sensors = loadSensors()
+  if not sensors or type(sensors.getValue) ~= "function" then return nil end
+  local source = (profileType == "rate_profile" or profileType == "rate") and "rate_profile" or "pid_profile"
+  local raw = tonumber(sensors.getValue(source))
+  if raw and raw > 0 then
+    return math.floor(raw)
+  end
+  return nil
+end
+
 --- Resolve active PID profile (1-indexed: 1..6)
 -- Precedence:
 -- 1. Live Telemetry Sensor "pid_profile" (real-time switch tracking)
 -- 2. Session State "session.activeProfile" (0-indexed -> 1-indexed)
 -- 3. Fallback defaultVal (nil if omitted, or caller-specified e.g. 1)
 function M.getActivePidProfile(defaultVal)
-  local sensors = loadSensors()
-  if sensors and type(sensors.getValue) == "function" then
-    local raw = tonumber(sensors.getValue("pid_profile"))
-    if raw and raw > 0 then
-      return math.floor(raw)
-    end
-  end
+  local live = M.getLive("pid")
+  if live then return live end
   local session = getSession()
   local active = tonumber(session and session.activeProfile)
   if active ~= nil then
@@ -54,13 +64,8 @@ end
 -- 2. Session State "session.activeRateProfile" (0-indexed -> 1-indexed)
 -- 3. Fallback defaultVal (nil if omitted, or caller-specified e.g. 1)
 function M.getActiveRateProfile(defaultVal)
-  local sensors = loadSensors()
-  if sensors and type(sensors.getValue) == "function" then
-    local raw = tonumber(sensors.getValue("rate_profile"))
-    if raw and raw > 0 then
-      return math.floor(raw)
-    end
-  end
+  local live = M.getLive("rate")
+  if live then return live end
   local session = getSession()
   local active = tonumber(session and session.activeRateProfile)
   if active ~= nil then

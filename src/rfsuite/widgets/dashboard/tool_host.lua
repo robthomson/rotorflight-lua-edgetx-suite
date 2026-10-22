@@ -11,12 +11,18 @@
 --
 -- Two things differ from the tool script, and both are the radio's rather than this file's:
 --
---   * A tool script is yielded when a call runs long; a widget call is stopped at the instruction
---     limit. A page that builds a lot in one call is therefore stopped part-way here, which is an
---     ordinary event for a page written for the tool script. The step below catches it and runs
---     the tool again on the next pass, and the page completes over several of them. A raise that
---     escapes the catch reaches the widget's entry point, which backs off as it does for any
---     other pass (src/widgets/rfsuite/main.lua).
+--   * A widget call is stopped at the instruction limit; the tool script, which a colour radio
+--     runs in a Lua state of its own, is not. EdgeTX raises that stop once per call and lets the
+--     rest of the call run, so it is caught by the innermost pcall around the code it lands in.
+--     For a page that builds a lot that is the build guard in ui/home.lua, which builds the page
+--     again on the next pass, a few passes in a row at most, before it shows the page as one that
+--     cannot be drawn: a build that fits in what a pass leaves it completes there, and a build
+--     that is above the limit on its own does not open here at all. A page's wakeup is stopped the same way
+--     and called again on the next pass, so a page that spreads its work over its wakeups has to
+--     keep each of them within what a pass leaves. A stop that escapes ui/home.lua reaches the
+--     step below, which runs the tool again on the next pass and gives up after CPU_GIVE_UP in a
+--     row; a raise that escapes that catch reaches the widget's entry point, which backs off as
+--     it does for any other pass (src/widgets/rfsuite/main.lua).
 --   * The tool's modules stay in this state's module cache after the tool is closed. The
 --     dashboard's own modules are in the same cache, so the cache cannot be emptied; only the
 --     entries the dashboard never uses -- the pages and the tool's interface -- are dropped.
@@ -33,7 +39,11 @@
 -- The tool is closed by its own closing sequence wherever that can still run: the back key at
 -- the top of its menu, the model arming, and fullscreen being left. Arming closes it because
 -- while it is open it runs in place of the dashboard's pass, and the dashboard's pass is what
--- makes the callouts. A widget sent to the background cannot paint and is dropped at once.
+-- makes the callouts. A widget sent to the background cannot paint and is dropped at once; its
+-- pages are still released on the way out (see finish). A save the tool started is not ended by
+-- the close: one that restarts the flight controller is dismissed as Back dismisses it (see
+-- leaveSave), and the dashboard drives it on to its end (driveLeftSave in
+-- widgets/dashboard/runtime.lua).
 --
 -- Loaded on the first press that opens the tool, never on a pass that does not.
 
@@ -45,9 +55,10 @@ local HOME_PATH = BASE_PATH .. "ui/home.lua"
 -- The module cache entries the tool brings and the dashboard does not use. Dropped on close.
 local TOOL_PREFIXES = { BASE_PATH .. "app/", BASE_PATH .. "ui/" }
 
--- How many instruction-limit stops in a row a phase may take before the tool is given up on. One
--- is normal for a page that builds a lot; a phase that is stopped every time is not going to
--- finish, and retrying it for ever would leave the widget showing nothing.
+-- How many instruction-limit stops in a row a phase may take before the tool is given up on. Only
+-- a stop that escapes ui/home.lua counts here (its page build and page wakeup catch their own); a
+-- phase that is stopped every time is not going to finish, and retrying it for ever would leave
+-- the widget showing nothing.
 local CPU_GIVE_UP = 12
 
 local requireModule = (_G.rfsuite and _G.rfsuite.require) or function(path)
@@ -156,11 +167,54 @@ local function dropToolModules()
   end
 end
 
+-- A save that restarts the flight controller holds the page, and Back on it dismisses it once the
+-- settings are stored: the save then finishes without a screen and reports when its page is entered
+-- again. The close takes the screen away without that press, so it dismisses the save the same way
+-- (tasks/msp/save_pipeline.lua, dismissWhenStored), and the dashboard drives it to its end
+-- (driveLeftSave in widgets/dashboard/runtime.lua). A save that does not restart the flight
+-- controller is left as Back leaves it, and so is an outcome already on screen. Asked when a close
+-- this host starts begins (fullscreen left, the model armed), since a reply can end the save during
+-- the closing sequence, and again in finish for every way out, the pilot's own close and those that
+-- skip that sequence included.
+local function toSavePipeline(name)
+  local pipeline = _G.rfsuite and _G.rfsuite.tasks and _G.rfsuite.tasks.savePipeline
+  if type(pipeline) ~= "table" or pipeline.run == nil then return end
+  local SavePipeline = requireModule("tasks/msp/save_pipeline.lua")
+  if type(SavePipeline) == "table" and type(SavePipeline[name]) == "function" then
+    pcall(SavePipeline[name])
+  end
+end
+
+local function leaveSave()
+  toSavePipeline("dismissWhenStored")
+end
+
+-- The tool opened again while such a dismissal still waits for the EEPROM commit shows the run
+-- once more, so the request is withdrawn (reclaim) before the tool's first build: the save then
+-- reports in the notice on this screen, whatever page the tool opens on, instead of being held for
+-- its page.
+local function reclaimSave()
+  toSavePipeline("reclaim")
+end
+
 -- Hand the screen and the globals back to the dashboard. Safe to run in any phase.
 local function finish(widget, reason)
   local host = widget._toolHost
   widget._toolHost = nil
   if host == nil then return end
+
+  -- The pages first, while everything their onClose may touch is still in place: a page switches
+  -- its override off or rolls back a live change only there, and a tool dropped without the
+  -- closing sequence -- abandoned, given up at the instruction limit, or stopped by an error --
+  -- would otherwise leave that change on the flight controller with nothing in this state able to
+  -- take it back. The writes it queues are sent by the dashboard's own MSP tick. A tool that went
+  -- through its closing sequence has released them already, and this finds nothing to do.
+  local home = host.home
+  if type(home) == "table" and type(home.releasePages) == "function" then
+    callInWidgetContext(home.releasePages)
+  end
+
+  leaveSave()
 
   removeLoader(host)
 
@@ -216,7 +270,8 @@ function M.isOpen(widget)
   return widget._toolHost ~= nil
 end
 
---- Drop the tool without its closing sequence, for a widget that can no longer paint it.
+--- Drop the tool without its closing sequence, for a widget that can no longer paint it. Its
+--- pages are released all the same (see finish).
 function M.abandon(widget, reason)
   finish(widget, reason or "abandoned")
 end
@@ -264,6 +319,7 @@ local function loadStep(widget, host)
 end
 
 local function initStep(widget, host)
+  reclaimSave()
   local ok, err = callInWidgetContext(host.home.init, { hosted = true, landing = host.landing })
   if not ok then return stopped(widget, host, err, "init") end
   host.phase = "run"
@@ -277,6 +333,7 @@ local function runStep(widget, host, event, touchState)
   -- closing sequence takes it down over the passes that follow, writes included.
   if not host.closing and (event == nil or modelArmed()) then
     host.closing = true
+    leaveSave()
     if type(home.requestClose) == "function" then pcall(home.requestClose) end
   end
   local ok, result = callInWidgetContext(home.run, event, touchState)

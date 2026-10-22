@@ -406,57 +406,6 @@ def _should_reverse_text(text: str, reverse_flag: bool | None) -> bool:
     return _contains_hebrew_chars(text)
 
 
-def get_esc_fallback(key: str) -> str:
-    # key structure: app.modules.esc_tools.mfg.<mfg>.<param>
-    parts = key.split('.')
-    if len(parts) < 6:
-        return None
-    param = parts[5]
-    
-    # Common dictionary lookup for no-underscore keys (mostly blheli_s / bluejay)
-    lookup = {
-        "beacondelay": "Beacon Delay",
-        "beaconstrength": "Beacon Strength",
-        "beepstrength": "Beep Strength",
-        "brakeonstop": "Brake On Stop",
-        "demagcompensation": "Demag Compensation",
-        "motordirection": "Motor Direction",
-        "motortiming": "Motor Timing",
-        "temperatureprotection": "Temperature Protection",
-        "ppmcenterthrottle": "PPM Center Throttle",
-        "ppmmaxthrottle": "PPM Max Throttle",
-        "ppmminthrottle": "PPM Min Throttle",
-        "startuppower": "Startup Power",
-        "waitingforesc": "Waiting for ESC...",
-        "brakingmode": "Braking Mode",
-        "brakingstrength": "Braking Strength",
-        "dithering": "Dithering",
-        "forceedtarm": "Force DShot Arm",
-        "ledcontrol": "LED Control",
-        "lowrpmpowerprotection": "Low RPM Power Protection",
-        "maxstartuppower": "Max Startup Power",
-        "minstartuppower": "Min Startup Power",
-        "powerrating": "Power Rating",
-        "pwmfrequency": "PWM Frequency",
-        "rampuppower": "Rampup Power",
-        "rampupstartpower": "Rampup Start Power",
-        "startupbeep": "Startup Beep",
-        "threshold48to24": "Threshold 48 to 24",
-        "threshold96to48": "Threshold 96 to 48",
-        "extra_msg_save": "Save successful"
-    }
-    
-    if param in lookup:
-        return lookup[param]
-        
-    # If it has underscores, split and capitalize
-    if '_' in param:
-        return ' '.join(word.capitalize() for word in param.split('_'))
-        
-    # Otherwise just capitalize the first letter
-    return param.capitalize()
-
-
 def replace_tags_in_text(text: str, translations: dict, stats: dict, fallback_translations: dict = None):
     def _sub(m: re.Match):
         key = m.group(1).strip()
@@ -485,67 +434,17 @@ def replace_tags_in_text(text: str, translations: dict, stats: dict, fallback_tr
                 key = new + key[len(old):]
                 break
 
-        ESC_FALLBACKS = {
-            "app.modules.esc_tools.mfg.blheli_s.name": "BLHeli_S",
-            "app.modules.esc_tools.mfg.bluejay.name": "Bluejay",
-            "app.modules.esc_tools.mfg.flrtr.name": "Flyrotor",
-            "app.modules.esc_tools.mfg.hw5.name": "Hobbywing",
-            "app.modules.esc_tools.mfg.omp.name": "OMP",
-            "app.modules.esc_tools.mfg.scorp.name": "Scorpion",
-            "app.modules.esc_tools.mfg.xdfly.name": "XDFly",
-            "app.modules.esc_tools.mfg.yge.name": "YGE",
-            "app.modules.esc_tools.mfg.ztw.name": "ZTW",
-            "app.modules.esc_tools.mfg.blheli_s.waitingforesc": "Waiting for ESC...",
-            "app.modules.esc_tools.mfg.bluejay.waitingforesc": "Waiting for ESC...",
-            "app.modules.esc_tools.mfg.blheli_s.basic": "Basic",
-            "app.modules.esc_tools.mfg.blheli_s.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.blheli_s.input": "Input",
-            "app.modules.esc_tools.mfg.bluejay.beacon": "Beacon",
-            "app.modules.esc_tools.mfg.bluejay.brake": "Brake",
-            "app.modules.esc_tools.mfg.bluejay.general": "General",
-            "app.modules.esc_tools.mfg.bluejay.other": "Other",
-            "app.modules.esc_tools.mfg.flrtr.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.flrtr.basic": "Basic",
-            "app.modules.esc_tools.mfg.flrtr.governor": "Governor",
-            "app.modules.esc_tools.mfg.flrtr.other": "Other",
-            "app.modules.esc_tools.mfg.hw5.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.hw5.basic": "Basic",
-            "app.modules.esc_tools.mfg.hw5.rotation": "Rotation",
-            "app.modules.esc_tools.mfg.omp.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.omp.basic": "Basic",
-            "app.modules.esc_tools.mfg.omp.governor": "Governor",
-            "app.modules.esc_tools.mfg.scorp.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.scorp.basic": "Basic",
-            "app.modules.esc_tools.mfg.scorp.limits": "Limits",
-            "app.modules.esc_tools.mfg.xdfly.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.xdfly.basic": "Basic",
-            "app.modules.esc_tools.mfg.xdfly.governor": "Governor",
-            "app.modules.esc_tools.mfg.yge.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.yge.basic": "Basic",
-            "app.modules.esc_tools.mfg.yge.other": "Other",
-            "app.modules.esc_tools.mfg.ztw.advanced": "Advanced",
-            "app.modules.esc_tools.mfg.ztw.basic": "Basic",
-            "app.modules.esc_tools.mfg.ztw.governor": "Governor",
-            "api.ESC_PARAMETERS_HW5.tbl_disabled": "Disabled",
-            "api.ESC_PARAMETERS_HW5.tbl_autocalculate": "Auto-Calculate",
-            "api.ESC_PARAMETERS_HW5.tbl_normal": "Normal",
-            "api.ESC_PARAMETERS_HW5.tbl_reverse": "Reverse",
-            "api.ESC_PARAMETERS_HW5.tbl_cw": "CW",
-            "api.ESC_PARAMETERS_HW5.tbl_ccw": "CCW",
-            "api.ESC_PARAMETERS_HW5.tbl_proportional": "Proportional",
-        }
-
         resolved = resolve_key(translations, key)
         if resolved is None and fallback_translations is not None:
             resolved = resolve_key(fallback_translations, key)
 
         if resolved is None:
-            esc_fb = get_esc_fallback(key)
-            if esc_fb is not None:
-                resolved_text, reverse_flag = esc_fb, False
-            elif key in ESC_FALLBACKS:
-                resolved_text, reverse_flag = ESC_FALLBACKS[key], False
-            elif inline_fallback is not None:
+            if inline_fallback is not None:
+                # The key is in neither bundle, so the pilot reads the call's own English
+                # in every locale. The build still finishes; the key is counted so that the
+                # run says which ones, instead of looking like a deliberate English default.
+                stats.setdefault('fallback_only', {}).setdefault(key, 0)
+                stats['fallback_only'][key] += 1
                 resolved_text, reverse_flag = inline_fallback, False
             else:
                 stats.setdefault('unresolved', {}).setdefault(key, 0)
@@ -568,7 +467,10 @@ def replace_tags_in_text(text: str, translations: dict, stats: dict, fallback_tr
 def process_file(path: Path, translations: dict, fallback_translations: dict = None, dry_run=False, lang='en'):
     """Resolve one file.
 
-    Returns (replaced, unresolved, write_failures).
+    Returns (replaced, unresolved, write_failures, fallback_only).
+
+    fallback_only counts the keys that resolved through the marker's inline
+    fallback alone, because neither bundle has them.
 
     write_failures is separate from replaced on purpose. A file that could not be
     written used to report 0 replacements, which is the same number a file that
@@ -584,11 +486,11 @@ def process_file(path: Path, translations: dict, fallback_translations: dict = N
         n += 1
 
     if n == 0:
-        return 0, stats.get('unresolved', {}), 0
+        return 0, stats.get('unresolved', {}), 0, stats.get('fallback_only', {})
 
     if dry_run:
         print(f"[i18n] DRY-RUN would update {path} — {n} replacement(s)")
-        return n, stats.get('unresolved', {}), 0
+        return n, stats.get('unresolved', {}), 0, stats.get('fallback_only', {})
 
     # Nothing to write is not a failed write. TAG_RE.subn counts every match,
     # including one whose key resolves to nothing and is therefore handed back
@@ -599,7 +501,7 @@ def process_file(path: Path, translations: dict, fallback_translations: dict = N
     # key. The unresolved key is counted in stats['unresolved'] either way, and
     # that is what decides the exit status.
     if new_text == before:
-        return 0, stats.get('unresolved', {}), 0
+        return 0, stats.get('unresolved', {}), 0, stats.get('fallback_only', {})
 
     # check writability (best-effort on Windows)
     writable = os.access(path, os.W_OK) and os.access(path.parent, os.W_OK)
@@ -611,10 +513,10 @@ def process_file(path: Path, translations: dict, fallback_translations: dict = N
         path.write_text(new_text, encoding='utf-8')
     except PermissionError as e:
         print(f"[i18n] FAILED to write (permission): {path} — {e}")
-        return 0, stats.get('unresolved', {}), 1
+        return 0, stats.get('unresolved', {}), 1, stats.get('fallback_only', {})
     except OSError as e:
         print(f"[i18n] FAILED to write (os error): {path} — {e}")
-        return 0, stats.get('unresolved', {}), 1
+        return 0, stats.get('unresolved', {}), 1, stats.get('fallback_only', {})
 
     # verify the write actually stuck
     try:
@@ -627,9 +529,9 @@ def process_file(path: Path, translations: dict, fallback_translations: dict = N
     # as it was, or cannot be read at all: a write that did not take effect.
     if after is None or after == before:
         print(f"[i18n] WARNING: write verification shows no change: {path}")
-        return 0, stats.get('unresolved', {}), 1
+        return 0, stats.get('unresolved', {}), 1, stats.get('fallback_only', {})
 
-    return n, stats.get('unresolved', {}), 0
+    return n, stats.get('unresolved', {}), 0, stats.get('fallback_only', {})
 
 def iter_source_files(root: Path, exts=('.lua', '.ts', '.tsx', '.js', '.jsx', '.json', '.md', '.txt')):
     for p in root.rglob('*'):
@@ -657,7 +559,7 @@ def self_test():
     )
 
     # (label, marker key, file made read-only, expected status, file must have
-    # changed, expected write failures reported)
+    # changed, expected write failures reported, expected keys in no bundle)
     #
     # The write-failure column is the point of the third one. An unresolved key
     # used to be reported as a failed write as well, because the untouched marker
@@ -665,17 +567,22 @@ def self_test():
     # and the write verification read the unchanged file as a write that did not
     # take. The exit status was right in both cases and the reason was not, which
     # points a reader at the disk when the key is what is missing.
+    #
+    # The last column is the number of keys reported as resolved from their inline
+    # fallback alone. The fourth case is the one that has it; the first is its
+    # control, a key the bundle has, which must report none.
     cases = [
-        ("clean tree, key resolves", "known", False, 0, True, 0),
-        ("unresolved key", "absent", False, 1, False, 0),
-        ("file that cannot be written", "known", True, 1, False, 1),
+        ("clean tree, key resolves", "known", False, 0, True, 0, 0),
+        ("unresolved key", "absent", False, 1, False, 0, 0),
+        ("file that cannot be written", "known", True, 1, False, 1, 0),
+        ("key in no bundle, inline fallback", "absent|Fallback Text", False, 0, True, 0, 1),
     ]
 
     import io
     from contextlib import redirect_stdout
 
     ok = True
-    for label, key, readonly, expect, expect_changed, expect_wf in cases:
+    for label, key, readonly, expect, expect_changed, expect_wf, expect_fb in cases:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "i18n").mkdir()
@@ -726,6 +633,15 @@ def self_test():
                 # pass on a run that reported nothing at all.
                 problems.append(
                     "reported %s write failure(s), expected %d" % (got_wf, expect_wf))
+            got_fb = None
+            m_fb = re.search(r"keys in no bundle: (\d+)", output)
+            if m_fb:
+                got_fb = int(m_fb.group(1))
+            if got_fb != expect_fb:
+                problems.append(
+                    "reported %s key(s) in no bundle, expected %d" % (got_fb, expect_fb))
+            if expect_fb and "selftest.absent: 1 occurrence(s)" not in output:
+                problems.append("the key in no bundle is not named in the report")
             if not os.access(target, os.R_OK) or not os.access(target, os.W_OK):
                 # The restore did not put the file back the way it was: the read bit,
                 # the write bit or both are gone. Report it as a failure of this case
@@ -752,7 +668,7 @@ def self_test():
     if ok:
         print("[self-test] all cases behaved as specified")
         return 0
-    print("[self-test] FAILED: the exit status does not tell the truth")
+    print("[self-test] FAILED: the exit status or the report does not tell the truth")
     return 1
 
 
@@ -760,7 +676,8 @@ def main():
     ap = argparse.ArgumentParser(description="Resolve @i18n(...)@ tags in a codebase")
     ap.add_argument('--list-transforms', action='store_true', help='List available transforms and exit')
     ap.add_argument('--self-test', action='store_true',
-                    help='Prove the exit status reports unresolved keys and failed writes')
+                    help='Prove the exit status reports unresolved keys and failed writes, and that '
+                         'a key answered only by its inline fallback is reported')
     ap.add_argument('--json', required=False, help='Path to en.json')
     ap.add_argument('--root', required=False, help='Root of codebase to scan')
     ap.add_argument('--dry-run', action='store_true', help='Do not write changes')
@@ -800,10 +717,11 @@ def main():
     total_files_changed = 0
     total_replacements = 0
     unresolved_agg = {}
+    fallback_only_agg = {}
     write_failures = 0
 
     for f in iter_source_files(root):
-        replaced, unresolved, failed = process_file(f, translations, fallback_translations=fallback_translations, dry_run=args.dry_run, lang=translations_path.stem.lower())
+        replaced, unresolved, failed, fallback_only = process_file(f, translations, fallback_translations=fallback_translations, dry_run=args.dry_run, lang=translations_path.stem.lower())
         write_failures += failed
         if replaced:
             total_files_changed += 1
@@ -811,8 +729,19 @@ def main():
         # aggregate unresolved
         for k, c in unresolved.items():
             unresolved_agg[k] = unresolved_agg.get(k, 0) + c
+        for k, c in fallback_only.items():
+            fallback_only_agg[k] = fallback_only_agg.get(k, 0) + c
 
-    print(f"[i18n] DONE — files changed: {total_files_changed}, total replacements: {total_replacements}, write failures: {write_failures}")
+    print(f"[i18n] DONE — files changed: {total_files_changed}, total replacements: {total_replacements}, write failures: {write_failures}, keys in no bundle: {len(fallback_only_agg)}")
+
+    # A key in neither bundle that carries an inline fallback resolves to that
+    # English text in every locale, and the build finishes. That is the documented
+    # behaviour; what used to be missing is that nothing said which keys took
+    # this path, so a key that was never added looked exactly like a translated one.
+    if fallback_only_agg:
+        print("[i18n] keys in no bundle, resolved from the call's own fallback:")
+        for k, c in sorted(fallback_only_agg.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"  {k}: {c} occurrence(s)")
 
     if unresolved_agg:
         print("[i18n] unresolved keys:")

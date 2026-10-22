@@ -14,7 +14,6 @@ local Common = nil
 local PowerModelPreferences = nil
 local MspRuntime = nil
 local SmartfuelApi = nil
-local ApiVersion = nil
 local Log = nil
 local LoadingOverlay = nil
 local t = nil
@@ -23,7 +22,6 @@ M.eepromWrite = true
 
 local function newRuntime()
 	return {
-		localSourceSet = nil,
 		firmwareModeSet = nil,
 		voltageSet = nil,
 		chargeSet = nil,
@@ -46,9 +44,6 @@ local ui = {
 		charge_drop_rate = 50,
 		sag_gain = 40
 	},
-	support = {
-		firmware = false
-	},
 	runtime = newRuntime(),
 	loading = false,
 	progress = 0
@@ -63,34 +58,6 @@ end
 local function getSession()
 	local root = _G and _G.rfsuite
 	return root and root.session or nil
-end
-
-local function parseApiVersionSafe(raw)
-	if ApiVersion and type(ApiVersion.parse) == "function" then
-		local parsed = ApiVersion.parse(raw)
-		if type(parsed) == "table" then return parsed end
-	end
-
-	if type(raw) ~= "string" then return nil end
-	local a, b, c = string.match(raw, "^(%d+)%.(%d+)%.(%d+)$")
-	if a then return { tonumber(a), tonumber(b), tonumber(c) } end
-	a, b = string.match(raw, "^(%d+)%.(%d+)$")
-	if a then return { tonumber(a), 0, tonumber(b) } end
-	return nil
-end
-
-local function isFirmwareSupported(session)
-	local rawApiVersion = session and session.apiVersion
-	if rawApiVersion == nil or rawApiVersion == "" or tostring(rawApiVersion) == "0" then
-		-- Do not hard-block SmartFuel before API version is published.
-		return true
-	end
-	local apiVersion = parseApiVersionSafe(rawApiVersion)
-	if type(apiVersion) ~= "table" then
-		-- Unknown formatting should not disable read/write permanently.
-		return true
-	end
-	return ApiVersion and ApiVersion.isAtLeast and ApiVersion.isAtLeast(apiVersion, { 12, 0, 9 }) or true
 end
 
 local function clampInt(value, minValue, maxValue, fallback)
@@ -108,7 +75,6 @@ local function ensureDeps()
 	if not PowerModelPreferences then PowerModelPreferences = loadModule("app/pages/setup/power/model_preferences.lua") end
 	if not MspRuntime then MspRuntime = loadModule("tasks/msp/runtime.lua") end
 	if not SmartfuelApi then SmartfuelApi = loadModule("tasks/msp/api/smartfuel_config.lua") end
-	if not ApiVersion then ApiVersion = loadModule("lib/api_version.lua") end
 	if not Log then Log = loadModule("lib/log.lua") end
 	if not LoadingOverlay then LoadingOverlay = loadModule("ui/loading_overlay.lua") end
 	if not t then t = Common and Common.pageT("setup_power_smartfuel") or nil end
@@ -131,6 +97,13 @@ local function pageText(i18n, key, fallback)
 		return t(i18n, key, fallback)
 	end
 	return fallback
+end
+
+-- The reason after a failed write of the model's file, in words (settings/common.lua). The page
+-- also runs without common.lua when that does not load, and the store's own answer stands in then.
+local function modelSaveReason(i18n, err)
+	if Common and Common.saveFailureReason then return Common.saveFailureReason(i18n, err, true) end
+	return tostring(err or "io")
 end
 
 local function markDirty()
@@ -158,14 +131,6 @@ local function buildModeOptions()
 	}
 end
 
-local function buildLocalOptions()
-	return {
-		{ value = 0, label = "CURRENT" },
-		{ value = 1, label = "VOLTAGE" },
-		{ value = 2, label = "COMBINED" }
-	}
-end
-
 local function getBatteryPrefs(session)
 	if type(session) ~= "table" then return nil end
 	if type(session.modelPreferences) ~= "table" then
@@ -182,7 +147,6 @@ local function loadFromSession()
 	local batteryPrefs = getBatteryPrefs(session)
 	local cfg = (type(session) == "table" and type(session.smartfuel_config) == "table") and session.smartfuel_config or nil
 
-	ui.support.firmware = isFirmwareSupported(session)
 	ui.config.local_source = clampInt((batteryPrefs and batteryPrefs.smartfuel_source) or (batteryPrefs and batteryPrefs.calc_local), 0, 2, 0)
 	ui.config.firmware_mode = clampInt(cfg and cfg.smartfuel_mode, 0, 3, 0)
 
@@ -201,7 +165,6 @@ local function buildSessionSignature()
 	local apiVersion = session and session.apiVersion or ""
 	return table.concat({
 		tostring(apiVersion or ""),
-		tostring(ui.support.firmware and 1 or 0),
 		tostring(cfg and cfg.smartfuel_mode or ""),
 		tostring(cfg and cfg.voltage_drop_rate or ""),
 		tostring(cfg and cfg.charge_drop_rate or ""),
@@ -219,10 +182,7 @@ local function queueSmartfuelRead()
 		logDebug("read skipped: pending")
 		return false, "read_pending"
 	end
-	if not ui.support.firmware then
-		logDebug("read skipped: firmware_not_supported")
-		return false, "firmware_not_supported"
-	end
+	ui.runtime.readComplete = false
 	if not SmartfuelApi or not MspRuntime or type(MspRuntime.getState) ~= "function" then
 		logWarn("read skipped: msp runtime/api unavailable")
 		return false, "msp_runtime_unavailable"
@@ -240,7 +200,7 @@ local function queueSmartfuelRead()
 	ui.loading = true
 	ui.progress = 0
 	local api = SmartfuelApi
-	logDebug("read enqueue cmd=" .. tostring(api.command) .. " apiVersion=" .. tostring(session and session.apiVersion) .. " firmwareSupport=" .. tostring(ui.support.firmware))
+	logDebug("read enqueue cmd=" .. tostring(api.command) .. " apiVersion=" .. tostring(session and session.apiVersion))
 	queue:add({
 		command = api.command,
 		simulatorResponse = api.simulatorResponse,
@@ -250,8 +210,9 @@ local function queueSmartfuelRead()
 			ui.runtime.readPending = false
 			ui.loading = false
 			ui.progress = 1
+			local parsed = nil
 			if type(session) == "table" then
-				local parsed = api.parse and api.parse(buf) or nil
+				parsed = api.parse and api.parse(buf) or nil
 				if type(parsed) == "table" then
 					session.smartfuel_config = parsed
 					if type(session.battery_config) == "table" then
@@ -259,6 +220,8 @@ local function queueSmartfuelRead()
 					end
 				end
 			end
+			-- Only a reply the page takes over counts: with an edit pending, what it shows is not it.
+			ui.runtime.readComplete = type(parsed) == "table" and not ui.dirty
 			if not ui.dirty then
 				loadFromSession()
 			end
@@ -289,16 +252,12 @@ end
 
 local function saveModelPreferences(session)
 	if not PowerModelPreferences or type(PowerModelPreferences.save) ~= "function" then
-		return false, "model_preferences_unavailable"
+		return false, "unavailable"
 	end
 	return PowerModelPreferences.save(session)
 end
 
 local function queueSmartfuelWrite(session)
-	if not ui.support.firmware then
-		logDebug("write skipped: firmware_not_supported")
-		return true, nil
-	end
 	if not SmartfuelApi or not MspRuntime or type(MspRuntime.getState) ~= "function" then
 		logWarn("write skipped: msp runtime/api unavailable")
 		return false, "msp_runtime_unavailable"
@@ -367,39 +326,38 @@ function M.onReload()
 	return false
 end
 
+-- The write sends all four values, so it waits for this visit's read: without it the page holds
+-- mode 0 (off) and its own defaults.
+function M.canSave()
+	return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+end
+
 function M.onSave(ctx)
 	ensureDeps()
 	ensureLoaded()
+	if not M.canSave() then return false, "loaded_data_missing" end
 
 	local session = getSession()
-	ui.support.firmware = isFirmwareSupported(session)
-	logDebug("onSave firmwareSupport=" .. tostring(ui.support.firmware) .. " apiVersion=" .. tostring(session and session.apiVersion))
 	local batteryPrefs = getBatteryPrefs(session)
 	if not batteryPrefs then
 		logWarn("onSave aborted: missing batteryPrefs")
 		return false
 	end
 
-	if not ui.support.firmware then
-		batteryPrefs.smartfuel_source = ui.config.local_source
-		batteryPrefs.calc_local = ui.config.local_source
-	end
 	batteryPrefs.voltage_drop_rate = ui.config.voltage_drop_rate
 	batteryPrefs.charge_drop_rate = ui.config.charge_drop_rate
 	batteryPrefs.sag_gain = ui.config.sag_gain
 
 	local okPrefs, errPrefs = saveModelPreferences(session)
 
-	if ui.support.firmware then
-		session.smartfuel_config = session.smartfuel_config or {}
-		session.smartfuel_config.smartfuel_mode = ui.config.firmware_mode
-		session.smartfuel_config.voltage_drop_rate = ui.config.voltage_drop_rate
-		session.smartfuel_config.charge_drop_rate = ui.config.charge_drop_rate
-		session.smartfuel_config.sag_gain = ui.config.sag_gain
+	session.smartfuel_config = session.smartfuel_config or {}
+	session.smartfuel_config.smartfuel_mode = ui.config.firmware_mode
+	session.smartfuel_config.voltage_drop_rate = ui.config.voltage_drop_rate
+	session.smartfuel_config.charge_drop_rate = ui.config.charge_drop_rate
+	session.smartfuel_config.sag_gain = ui.config.sag_gain
 
-		if type(session.battery_config) == "table" then
-			session.battery_config.smartfuelRemoteSource = ui.config.firmware_mode
-		end
+	if type(session.battery_config) == "table" then
+		session.battery_config.smartfuelRemoteSource = ui.config.firmware_mode
 	end
 
 	local okMsp, errMsp = queueSmartfuelWrite(session)
@@ -410,11 +368,19 @@ function M.onSave(ctx)
 			local savedMessage = pageText(ctx and ctx.i18n, "saved_message", "SmartFuel settings saved")
 			ctx.reportSave({ ok = true, title = savedTitle, message = savedMessage })
 		elseif okMsp and not okPrefs then
-			ctx.reportSave({ title = "Warning", message = "SmartFuel values sent to FC. Model prefs save failed: " .. tostring(errPrefs or "io") })
+			ctx.reportSave({
+				title = pageText(ctx.i18n, "warning_title", "Warning"),
+				message = pageText(ctx.i18n, "model_prefs_failed_message", "SmartFuel values sent to FC; model settings not saved")
+					.. ": " .. modelSaveReason(ctx.i18n, errPrefs)
+			})
 		elseif (not okMsp) and okPrefs then
 			ctx.reportSave({ title = "Warning", message = "Saved local SmartFuel values. FC write pending: " .. tostring(errMsp or "msp") })
 		else
-			ctx.reportSave({ title = "Warning", message = "FC write pending and model prefs save failed: " .. tostring(errPrefs or "io") })
+			ctx.reportSave({
+				title = pageText(ctx.i18n, "warning_title", "Warning"),
+				message = pageText(ctx.i18n, "pending_model_prefs_failed_message", "FC write pending; model settings not saved")
+					.. ": " .. modelSaveReason(ctx.i18n, errPrefs)
+			})
 		end
 	end
 
@@ -440,12 +406,7 @@ function M.wakeup(ctx)
 
 	if ui.dirty then return end
 
-	local previousFirmwareSupport = ui.support.firmware
 	loadFromSession()
-	if ui.support.firmware and (not previousFirmwareSupport) then
-		logDebug("firmware support became available; triggering read")
-		queueSmartfuelRead()
-	end
 
 	local signature = buildSessionSignature()
 	if signature ~= ui.runtime.lastSessionSignature then
@@ -454,17 +415,6 @@ function M.wakeup(ctx)
 			ui.runtime.requestRebuild()
 		end
 	end
-end
-
-local function getLocalSourceSetter()
-	if ui.runtime.localSourceSet then return ui.runtime.localSourceSet end
-	ui.runtime.localSourceSet = function(value)
-		local nextValue = clampInt(value, 0, 2, 0)
-		if ui.config.local_source == nextValue then return end
-		ui.config.local_source = nextValue
-		markDirty()
-	end
-	return ui.runtime.localSourceSet
 end
 
 local function getFirmwareModeSetter()
@@ -511,9 +461,17 @@ local function getSagSetter()
 	return ui.runtime.sagSet
 end
 
+-- The three values tune the voltage track of the estimate, so they are offered where it has one:
+-- the board's own estimate with Firmware Source VOLTAGE (1) or COMBINED (3), and with it OFF (0)
+-- the radio's, whose source is set under Power > Preferences (1 VOLTAGE, 2 COMBINED). The radio's
+-- voltage estimate reads the same three values (tasks/events/telemetry_bg/smart.lua,
+-- computeVoltageMode); its COMBINED source is offered under the same rule, for its voltage track.
 local function isTuningEnabled()
-	if not ui.support.firmware then return true end
-	return ui.config.firmware_mode == 1 or ui.config.firmware_mode == 3
+	local mode = ui.config.firmware_mode
+	if mode == 0 then
+		return ui.config.local_source == 1 or ui.config.local_source == 2
+	end
+	return mode == 1 or mode == 3
 end
 
 function M.build(ctx)
@@ -532,35 +490,18 @@ function M.build(ctx)
 	Controls.appendStaticSectionHeader(children, x, y, w, pageText(i18n, "section_mode", "SmartFuel Mode"))
 	local cursorY = y + Controls.STATIC_SECTION_H
 
-	if ui.support.firmware then
-		cursorY = cursorY + Controls.appendComboSelect(
-			children, x, cursorY, w,
-			pageText(i18n, "firmware_mode", "Firmware Source"),
-			buildModeOptions(),
-			ui.config.firmware_mode,
-			getFirmwareModeSetter(),
-			{
-				helpText = pageText(i18n, "help_firmware_mode", "Choose whether firmware SmartFuel is disabled, voltage-estimated, current consumption based, or combined. Combined uses the more pessimistic of voltage and current consumption."),
-				helpTitle = pageText(i18n, "firmware_mode", "Firmware Source"),
-				onHelp = getInlineHelpHandler()
-			}
-		)
-	end
-
-	if not ui.support.firmware then
-		cursorY = cursorY + Controls.appendComboSelect(
-			children, x, cursorY, w,
-			pageText(i18n, "local_mode", "Local Source"),
-			buildLocalOptions(),
-			ui.config.local_source,
-			getLocalSourceSetter(),
-			{
-				helpText = pageText(i18n, "help_local_mode", "Choose whether local SmartFuel uses current consumption, pack voltage, or combined mode. Combined uses the more pessimistic of voltage and current consumption."),
-				helpTitle = pageText(i18n, "local_mode", "Local Source"),
-				onHelp = getInlineHelpHandler()
-			}
-		)
-	end
+	cursorY = cursorY + Controls.appendComboSelect(
+		children, x, cursorY, w,
+		pageText(i18n, "firmware_mode", "Firmware Source"),
+		buildModeOptions(),
+		ui.config.firmware_mode,
+		getFirmwareModeSetter(),
+		{
+			helpText = pageText(i18n, "help_firmware_mode", "Choose whether firmware SmartFuel is disabled, voltage-estimated, current consumption based, or combined. Combined uses the more pessimistic of voltage and current consumption."),
+			helpTitle = pageText(i18n, "firmware_mode", "Firmware Source"),
+			onHelp = getInlineHelpHandler()
+		}
+	)
 
 	cursorY = cursorY + 8
 	Controls.appendStaticSectionHeader(children, x, cursorY, w, pageText(i18n, "section_tuning", "SmartFuel Tuning"))
@@ -586,7 +527,7 @@ function M.build(ctx)
 			get = function() return ui.config.charge_drop_rate end,
 			set = getChargeSetter(),
 			enabled = isTuningEnabled,
-			helpText = pageText(i18n, "help_charge_drop_rate", "Maximum rate the reported SmartFuel value may recover in voltage mode after load is reduced."),
+			helpText = pageText(i18n, "help_charge_drop_rate", "Limits how quickly the reported SmartFuel value may drop in voltage mode once the model has been armed."),
 			helpTitle = pageText(i18n, "charge_drop_rate", "Charge drop rate"),
 			onHelp = getInlineHelpHandler(),
 			display = function(v)
@@ -642,6 +583,11 @@ function M.onClose()
 	Log = nil
 	LoadingOverlay = nil
 	t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+	return ui.dirty == true
 end
 
 return M

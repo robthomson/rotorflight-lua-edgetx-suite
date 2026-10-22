@@ -410,6 +410,8 @@ local function queueRcRead(isAutoReload)
   end
 
   local readValid = type(getSession()) == "table"
+  -- The profile this read is for; M.canSave holds the values on screen to it.
+  local readProfile = getLiveProfile()
   ui.runtime.readPending = true
   if not isAutoReload then
     ui.loading = true
@@ -430,22 +432,23 @@ local function queueRcRead(isAutoReload)
         local session = getSession()
         if session then
           local rcConfig = getRcConfig(session)
-          local oldRatesType = rcConfig.rates_type
           for k, v in pairs(parsed) do
             rcConfig[k] = v
           end
-          loadFromSession()
-          
+          -- A pending edit is not read over: M.canSave refuses until it is resolved.
+          if not ui.dirty then
+            loadFromSession()
+            ui.runtime.readProfile = readProfile
+          end
           ui.runtime.readPending = false
           ui.loading = false
-          ui.dirty = false
           ui.progress = 100
           ui.runtime.readComplete = readValid
           
-          if not isAutoReload or oldRatesType ~= parsed.rates_type then
-            if type(ui.runtime.requestRebuild) == "function" then
-              ui.runtime.requestRebuild()
-            end
+          -- Rebuilt after every read: the heading's profile number, the rates type and the
+          -- polar/standard rows are all decided in build.
+          if type(ui.runtime.requestRebuild) == "function" then
+            ui.runtime.requestRebuild()
           end
         end
       end
@@ -739,13 +742,20 @@ function M.onReload(ctx)
   if session then
     loadFromSession()
     ui.dirty = false
-    queueRcRead()
+    local signature = buildSessionSignature()
+    if queueRcRead() then ui.runtime.lastSessionSignature = signature end
   end
   return true
 end
 
+-- MSP_SET_RC_TUNING carries no profile index: the board stores the record in whichever rate profile
+-- is active when it arrives. A profile switch after the read therefore refuses Save until the page
+-- has read the active profile; the second value is the reason the host shows.
 function M.canSave()
-  return ui.runtime ~= nil and ui.runtime.readComplete == true and not ui.runtime.readPending
+  if ui.runtime == nil or ui.runtime.readComplete ~= true or ui.runtime.readPending then return false end
+  if ui.runtime.readProfile == nil then return false end
+  if getLiveProfile() ~= ui.runtime.readProfile then return false, "profile_changed" end
+  return true
 end
 
 function M.onSave(ctx)
@@ -805,13 +815,11 @@ function M.build(ctx)
     return
   end
 
+  -- Never taken over while an edit is pending: the signature is what M.canSave holds the edit to.
   local sig = buildSessionSignature()
-  if sig ~= ui.runtime.lastSessionSignature then
-    ui.runtime.lastSessionSignature = sig
-    if not ui.dirty then
-      loadFromSession()
-      queueRcRead()
-    end
+  if sig ~= ui.runtime.lastSessionSignature and not ui.dirty then
+    loadFromSession()
+    if queueRcRead() then ui.runtime.lastSessionSignature = sig end
   end
 
   local ratesType = ui.config.rates_type or 6 -- Default Rotorflight
@@ -839,7 +847,8 @@ function M.build(ctx)
     ui.runtime.syncHeaderTitle(ui.baseTitle, M.getHeaderActions())
   end
 
-  local profileDisplay = getLiveProfile()
+  -- The profile the values on screen were read from; a pending edit keeps it after a switch.
+  local profileDisplay = ui.runtime.readProfile or getLiveProfile()
   local sectionHeaderH = (Controls and Controls.STATIC_SECTION_H) or 38
   local cursorY = y
   if Controls and type(Controls.appendStaticSectionHeader) == "function" then
@@ -862,12 +871,13 @@ function M.wakeup(ctx)
     ui.runtime.requestRebuild = ctx.requestRebuild
   end
 
+  -- A switch is not read over a pending edit; M.canSave refuses until Reload reads the new profile.
   if ui.dirty then return end
 
   local signature = buildSessionSignature()
-  if signature ~= ui.runtime.lastSessionSignature then
+  -- Taken over only with a read sent under it: a read already out belongs to the old profile.
+  if signature ~= ui.runtime.lastSessionSignature and queueRcRead(true) then -- Silent auto-reload
     ui.runtime.lastSessionSignature = signature
-    queueRcRead(true) -- Silent auto-reload
   end
 
   if type(ui.runtime) == "table" and type(ui.runtime.syncHeaderTitle) == "function" then
@@ -887,6 +897,11 @@ function M.closePage()
     -- We could implement auto-save here, but Ethos typically uses confirmation dialogs.
   end
   ui.loaded = false
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

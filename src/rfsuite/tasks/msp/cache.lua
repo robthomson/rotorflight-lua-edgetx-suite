@@ -89,6 +89,8 @@ end
 -- profile switch and is then served for the wrong profile. An unknown profile therefore costs
 -- a round trip -- Cache.get and Cache.put both treat a nil key as not cacheable -- instead of
 -- costing a wrong answer.
+-- The same holds for the session's profile: it is set at connect and does not follow a switch
+-- made on the transmitter, so only the profile the telemetry reports is a key.
 function Cache.keyFor(command)
   local kind = CACHEABLE[command]
   if kind == nil then
@@ -96,12 +98,12 @@ function Cache.keyFor(command)
   end
   local profileHelper = ensureProfileDep()
   if kind == PID_PROFILE then
-    local profile = profileHelper and profileHelper.getActivePidProfile()
+    local profile = profileHelper and profileHelper.getLive("pid")
     if profile == nil then return nil end
     return PID_PROFILE .. "=" .. tostring(profile)
   end
   if kind == RATE_PROFILE then
-    local profile = profileHelper and profileHelper.getActiveRateProfile()
+    local profile = profileHelper and profileHelper.getLive("rate")
     if profile == nil then return nil end
     return RATE_PROFILE .. "=" .. tostring(profile)
   end
@@ -121,10 +123,12 @@ function Cache.get(command)
   return entry.buf
 end
 
---- Keep a reply. Ignored for a command that is not listed above.
-function Cache.put(command, buf)
+--- Keep a reply. Ignored for a command that is not listed above, and for a reply whose key
+-- moved while it was out: `sentKey` is Cache.keyFor at the time the request was sent, and a
+-- switch in between leaves it unknown which profile answered.
+function Cache.put(command, buf, sentKey)
   local key = Cache.keyFor(command)
-  if key == nil or type(buf) ~= "table" then
+  if key == nil or key ~= sentKey or type(buf) ~= "table" then
     return false
   end
   local copy = {}

@@ -17,26 +17,28 @@ local LoadingOverlay = nil
 local ConfirmDialog = nil
 local t = nil
 
+-- Each label is a key and fallback pair in the form the packager translates in place, so an
+-- installed suite shows it in the pilot's language.
 local BEEPER_FIELDS = {
-  { bit = 0, key = "field_gyro_calibrated", default = "Gyro calibrated" },
-  { bit = 1, key = "field_rx_lost", default = "RX lost" },
-  { bit = 2, key = "field_rx_lost_landing", default = "RX lost landing" },
-  { bit = 3, key = "field_disarming", default = "Disarming" },
-  { bit = 4, key = "field_arming", default = "Arming" },
-  { bit = 5, key = "field_arming_gps_fix", default = "Arming GPS fix" },
-  { bit = 6, key = "field_bat_crit_low", default = "Battery critical low" },
-  { bit = 7, key = "field_bat_low", default = "Battery low" },
-  { bit = 8, key = "field_gps_status", default = "GPS status" },
-  { bit = 9, key = "field_rx_set", default = "RX set" },
-  { bit = 10, key = "field_acc_calibration", default = "ACC calibration" },
-  { bit = 11, key = "field_acc_calibration_fail", default = "ACC calibration fail" },
-  { bit = 12, key = "field_ready_beep", default = "Ready beep" },
-  { bit = 14, key = "field_disarm_repeat", default = "Disarm repeat" },
-  { bit = 15, key = "field_armed", default = "Armed" },
-  { bit = 16, key = "field_system_init", default = "System init" },
-  { bit = 17, key = "field_usb", default = "USB" },
-  { bit = 18, key = "field_blackbox_erase", default = "Blackbox erase" },
-  { bit = 21, key = "field_arming_gps_no_fix", default = "Arming GPS no fix" }
+  { bit = 0, labelKey = "field_gyro_calibrated", labelFallback = "Gyro calibrated" },
+  { bit = 1, labelKey = "field_rx_lost", labelFallback = "RX lost" },
+  { bit = 2, labelKey = "field_rx_lost_landing", labelFallback = "RX lost landing" },
+  { bit = 3, labelKey = "field_disarming", labelFallback = "Disarming" },
+  { bit = 4, labelKey = "field_arming", labelFallback = "Arming" },
+  { bit = 5, labelKey = "field_arming_gps_fix", labelFallback = "Arming GPS fix" },
+  { bit = 6, labelKey = "field_bat_crit_low", labelFallback = "Battery critical low" },
+  { bit = 7, labelKey = "field_bat_low", labelFallback = "Battery low" },
+  { bit = 8, labelKey = "field_gps_status", labelFallback = "GPS status" },
+  { bit = 9, labelKey = "field_rx_set", labelFallback = "RX set" },
+  { bit = 10, labelKey = "field_acc_calibration", labelFallback = "ACC calibration" },
+  { bit = 11, labelKey = "field_acc_calibration_fail", labelFallback = "ACC calibration fail" },
+  { bit = 12, labelKey = "field_ready_beep", labelFallback = "Ready beep" },
+  { bit = 14, labelKey = "field_disarm_repeat", labelFallback = "Disarm repeat" },
+  { bit = 15, labelKey = "field_armed", labelFallback = "Armed" },
+  { bit = 16, labelKey = "field_system_init", labelFallback = "System init" },
+  { bit = 17, labelKey = "field_usb", labelFallback = "USB" },
+  { bit = 18, labelKey = "field_blackbox_erase", labelFallback = "Blackbox erase" },
+  { bit = 21, labelKey = "field_arming_gps_no_fix", labelFallback = "Arming GPS no fix" }
 }
 
 local ui = {
@@ -345,7 +347,7 @@ function M.build(ctx)
 
   for i = 1, #BEEPER_FIELDS do
     local def = BEEPER_FIELDS[i]
-    local label = pageText(i18n, def.key, def.default)
+    local label = pageText(i18n, def.labelKey, def.labelFallback)
     
     cursorY = cursorY + Controls.appendRadioSwitch(
       children,
@@ -381,6 +383,9 @@ end
 
 function M.onSave(ctx)
   if not M.canSave() then return false, "loaded_data_missing" end
+  -- The header's Save stays reachable over the overlay. A second save beside the running one
+  -- would send the same write again, with a second EEPROM write.
+  if ui.saving then return false end
   local ok, err = queueBeeperConfigWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
@@ -395,6 +400,8 @@ function M.onSave(ctx)
 end
 
 function M.onReload(ctx)
+  -- Nothing is read under a running save; Reload works again once the save has finished.
+  if ui.saving then return true end
   local session = getSession()
   if session then
     ui.dirty = false
@@ -427,6 +434,11 @@ function M.onClose()
   LoadingOverlay = nil
   ConfirmDialog = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

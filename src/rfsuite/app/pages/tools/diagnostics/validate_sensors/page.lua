@@ -95,6 +95,8 @@ local SENSOR_CATALOG = {
   [97] = { label = "Battery Profile", source = "BAT#" },
   [98] = { label = "LED Profile", source = "LED#" },
   [99] = { label = "Adjustment Function", sources = { "AdjF", "AdjV" } },
+  [120] = { label = "System Status", source = "STAT" },
+  [121] = { label = "System Config", source = "SCFG" },
 }
 
 local state = {

@@ -45,11 +45,55 @@ local lastPublishedAt = {}
 -- FORCE_REFRESH_INTERVAL stale, which is the right trade for a decoder diagnostic.
 local lastCounterAt = 0
 
+-- Up to three Lua states decode the same frames -- the function script, the dashboard and the
+-- tool -- each with counters of its own, and all of them publish to the same two sensors. Each
+-- state is served its own copy of every frame, so while one stands aside (another is draining,
+-- or the tool has paused the function script) the frames it does not take are simply never
+-- seen by it, apart from the oldest few its queue kept. When it drains again, those are stale,
+-- its last frame id is older still, and its skip count is its own, not the one on the radio:
+-- the ids read as a gap, and its count replaces the published one -- a jump either way, which a
+-- reader of *Skp cannot tell from frames the link really lost.
+--
+-- So a state that resumes counts no gap for REMOTE_STALE_SECONDS -- long enough to take its
+-- backlog and the step from it to the live frames -- and continues the skip count from the
+-- value on the radio, so the published count moves only by what this state sees from then on.
+-- Two exceptions. The radio still shows this state's own last value: its count
+-- here is newer and is kept. And the counters here were reset by a lost link and no decoder
+-- has published since (the frame count on the radio has not moved): the value on the radio is
+-- then the previous connection's, and the count rightly starts over.
+local resyncPending = true
+local resyncUntil = 0
+local passNow = 0
+local adoptPublished = true
+local resetFrameCount = nil
+local lastPublishedSkip = nil
+local lastWakeAt = nil
+
 local function publishCounters(count, skip, now)
     if (now - lastCounterAt) < FORCE_REFRESH_INTERVAL then return end
     lastCounterAt = now
+    lastPublishedSkip = skip
+    resetFrameCount = nil
     setTelemetryValue(0xEE01, 0, 0, count, 0, 0, "*Cnt")
     setTelemetryValue(0xEE02, 0, 0, skip, 0, 0, "*Skp")
+end
+
+local function radioNumber(name)
+    local ok, value = pcall(getValue, name)
+    if ok and type(value) == "number" then return value end
+    return nil
+end
+
+local function adoptRadioSkip()
+    local published = radioNumber("*Skp")
+    if published == nil then return end
+    if resetFrameCount ~= nil then
+        local count = radioNumber("*Cnt")
+        if count == nil or count == resetFrameCount then return end
+    end
+    published = math.floor(published)
+    if published == lastPublishedSkip then return end
+    telemetryFrameSkip = published
 end
 
 local function publishSensorValue(sid, value, sensor, now)
@@ -131,9 +175,11 @@ local function popAndAccount()
     local fid, ptr
     ptr = 3
     fid, ptr = decU8(data, ptr)
-    local delta = bit32.band(fid - telemetryFrameId, 0xFF)
-    if delta > 1 then
-        telemetryFrameSkip = telemetryFrameSkip + 1
+    if passNow >= resyncUntil then
+        local delta = bit32.band(fid - telemetryFrameId, 0xFF)
+        if delta > 1 then
+            telemetryFrameSkip = telemetryFrameSkip + 1
+        end
     end
     telemetryFrameId = fid
     telemetryFrameCount = telemetryFrameCount + 1
@@ -269,6 +315,23 @@ function M.wakeup(now, decodeAll)
         return 0
     end
 
+    -- A pass after a stretch in which this state took no frames is a resume (see `resyncPending`
+    -- above). The values on the radio are read once per resume, not per pass.
+    if lastWakeAt ~= nil and (now - lastWakeAt) > M.REMOTE_STALE_SECONDS then
+        resyncPending = true
+        adoptPublished = true
+    end
+    lastWakeAt = now
+    passNow = now
+    if resyncPending then
+        resyncPending = false
+        resyncUntil = now + M.REMOTE_STALE_SECONDS
+    end
+    if adoptPublished then
+        adoptPublished = false
+        adoptRadioSkip()
+    end
+
     -- Pop up to POP_CAP, keep the newest DECODE_CAP in arrival order, decode only those --
     -- on a same-sensor conflict the newest value lands last. POP_CAP bounds the pass whether
     -- or not the decode is capped, so one call stays finite however far behind the queue is.
@@ -306,6 +369,10 @@ end
 -- one lost its flight controller.
 function M.reset()
     telemetryFrameId = 0
+    resyncPending = true
+    adoptPublished = true
+    lastPublishedSkip = nil
+    resetFrameCount = radioNumber("*Cnt") or false
     telemetryFrameSkip = 0
     telemetryFrameCount = 0
     lastPublishedValue = {}

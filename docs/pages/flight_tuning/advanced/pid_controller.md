@@ -19,7 +19,7 @@ Read-only while the model is armed.
 | Setting | What it does |
 | --- | --- |
 | Ground Error Decay | Time constant for the decay of the accumulated error while the helicopter is on the ground, so it does not tip over before take-off. 0.0 to 25.0 s, default 2.5 s; 0 leaves the ground phase to the in-flight decay. |
-| Inflight Error Decay (Time / Limit) | Time is the time constant of the decay in flight, 0.0 to 25.0 s, default 25.0 s; 0 switches it off. Limit caps how fast the decay may remove the error, 0 to 25, default 12; 0 removes the cap. |
+| Inflight Error Decay (Time / Limit) | Time is the time constant of the decay in flight, 0.0 to 25.0 s, default 25.0 s; 0 switches it off. Limit caps how fast the decay may remove the error, 0 to 250, default 12; 0 removes the cap. |
 | Error Decay Stick Gain | *MSP API 12.10 and later.* Makes the roll and pitch error decay faster the further the cyclic stick is deflected, on the ground and in flight, so the I-term does not wind up while the stick is held against a helicopter that cannot follow, for example on a slope take-off. 0 to 250, default 0 (off). |
 | Error limit (R / P / Y) | Angle limit for the I-term on roll, pitch and yaw. 0 to 180°, defaults 45°, 45°, 60°. |
 | HSI Offset limit (R / P) | Angle limit for the High Speed Integral (O-term) on roll and pitch. 0 to 180°, default 90°. |
@@ -34,6 +34,6 @@ Read-only while the model is armed.
 
 ## Related
 
-- [Rotorflight documentation: Profiles tab](https://www.rotorflight.org/docs/configurator/tabs/profiles)
+- [Rotorflight documentation: Profiles tab](https://doc.rotorflight.org/configurator/tabs/profiles/)
 
 *Documented against RFSuite 0.1.7.*

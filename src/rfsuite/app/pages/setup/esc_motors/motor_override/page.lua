@@ -176,6 +176,7 @@ local function queueOverrideRead()
   if not StatusApi then return false end
 
   ui.runtime.readPending = true
+  ui.runtime.readFailed = false
   ui.loading = true
   ui.progress = 0
   if type(ui.runtime.requestRebuild) == "function" then
@@ -192,15 +193,27 @@ local function queueOverrideRead()
     end
   end
 
+  -- Without the status reply the page does not know how many motors the board has, and
+  -- without the override reply what it is driving now. Neither is guessed: the page says the
+  -- read failed and offers no motor until Reload has read both. ensureLoaded does not queue
+  -- the read again by itself, so a board that does not answer is not asked on every wakeup.
+  local common = Common
+  local function fail()
+    ui.loaded = false
+    ui.motorCount = 0
+    ui.selected = 0
+    ui.percent = {}
+    common.failPageRead(ui)
+  end
+
   -- Step 1: how many motors this board has.
   queue:add({
     command = StatusApi.command,
     simulatorResponse = StatusApi.simulatorResponse,
     processReply = function(_, statusBuf)
       local status = StatusApi.parse(statusBuf)
-      if status then
-        ui.motorCount = status.motor_count or 0
-      end
+      if not status then return fail() end
+      ui.motorCount = status.motor_count or 0
       if ui.selected >= effectiveMotorCount() then
         ui.selected = 0
       end
@@ -217,22 +230,21 @@ local function queueOverrideRead()
         simulatorResponse = MotorOverrideApi.simulatorResponse,
         processReply = function(_, overrideBuf)
           local values = MotorOverrideApi.parse(overrideBuf)
-          if values then
-            for i = 0, effectiveMotorCount() - 1 do
-              local value = tonumber(values["motor_" .. (i + 1)]) or 0
-              if value < 0 then value = 0 end
-              ui.percent[i] = math.floor(value * 100 / MotorOverrideApi.OVERRIDE_MAX)
-            end
+          if not values then return fail() end
+          for i = 0, effectiveMotorCount() - 1 do
+            local value = tonumber(values["motor_" .. (i + 1)]) or 0
+            if value < 0 then value = 0 end
+            ui.percent[i] = math.floor(value * 100 / MotorOverrideApi.OVERRIDE_MAX)
           end
           finish()
         end,
         errorHandler = function()
-          finish()
+          fail()
         end
       })
     end,
     errorHandler = function()
-      finish()
+      fail()
     end
   })
 
@@ -240,7 +252,7 @@ local function queueOverrideRead()
 end
 
 local function ensureLoaded()
-  if ui.loaded or ui.runtime.readPending then return end
+  if ui.loaded or ui.runtime.readPending or ui.runtime.readFailed then return end
   queueOverrideRead()
 end
 
@@ -298,6 +310,7 @@ function M.wakeup(ctx)
   if signature ~= ui.runtime.lastSessionSignature then
     ui.runtime.lastSessionSignature = signature
     ui.loaded = false
+    ui.runtime.readFailed = false
     ui.inOverride = false
     ui.percent = {}
   end
@@ -326,6 +339,7 @@ end
 
 function M.getHeaderActions()
   return {
+    reload = true,
     help = true,
     menu = true
   }
@@ -353,6 +367,19 @@ function M.build(ctx)
       message = pageText(i18n, "loading_motor_override", "Reading motor override..."),
       progress = ui.progress / 100
     })
+    return
+  end
+
+  if ui.runtime.readFailed then
+    if type(ui.runtime.syncHeaderTitle) == "function" then
+      ui.runtime.syncHeaderTitle(title, M.getHeaderActions())
+    end
+    local cursorY = y
+    if Controls and type(Controls.appendStaticSectionHeader) == "function" then
+      Controls.appendStaticSectionHeader(children, x, cursorY, w, title)
+      cursorY = cursorY + (Controls.STATIC_SECTION_H or 50)
+    end
+    Common.appendReadFailedNotice(children, x, cursorY + 10, w)
     return
   end
 
@@ -439,6 +466,18 @@ function M.build(ctx)
   )
 end
 
+--- Reads the board again. A running override is ended first, as on leaving the page: the read
+--- replaces the motor list it was chosen from.
+function M.onReload()
+  if ui.runtime.readPending then return false end
+  stopOverride()
+  ui.loaded = false
+  ui.runtime.readFailed = false
+  ui.percent = {}
+  queueOverrideRead()
+  return true
+end
+
 function M.onHelp(ctx)
   local help = loadModule("app/pages/setup/esc_motors/motor_override/help.lua")
   if type(help) == "function" then
@@ -465,6 +504,7 @@ function M.onClose()
   ui.selected = 0
   ui.writeInFlight = false
   ui.runtime.readPending = false
+  ui.runtime.readFailed = false
   ui.runtime.requestRebuild = nil
   ui.runtime.syncHeaderTitle = nil
   ui.runtime.lastSessionSignature = nil

@@ -254,6 +254,18 @@ local function traceInstructionUsage(self)
   -- rate, and a widget at twelve per cent of budget and thirty passes a second is a different
   -- machine from one at twelve per cent and four.
   --
+  -- `widget.background` bumps the same counter. EdgeTX calls `background()` instead of
+  -- `refresh()` for a widget that is not on the visible screen -- one on another screen page, or
+  -- behind one of the radio's menu pages (WidgetsContainer::refreshWidgets,
+  -- radio/src/gui/colorlcd/mainview/widgets_container.cpp) -- and that pass still runs the
+  -- dashboard's background work, so a counter bumped here alone would stand still for as long as
+  -- the dashboard is off screen and the reader would record a running widget as stopped. Bumped
+  -- by both, it stands still only while the radio calls this widget not at all, which is the case
+  -- it exists for: past the instruction budget the radio calls neither (LuaWidget::background
+  -- returns at once on a widget that has raised, radio/src/lua/lua_widget.cpp). The few lines
+  -- below are repeated there rather than shared through a function, because a call here would
+  -- cost every pass that draws.
+  --
   -- The gate is sampled on the report window below and cached, not asked per pass: this is a
   -- diagnostic, it belongs behind the debug level like every other, and asking the preferences
   -- for it thirty times a second would be the diagnostic becoming the cost.
@@ -269,6 +281,13 @@ local function traceInstructionUsage(self)
   if self._shmPass >= SHM_PASS_WRAP then self._shmPass = 1 end
   if self._shmOn and type(setShmVar) == "function" then
     setShmVar(SHM_PASS_ID, self._shmPass * SHM_PASS_SHIFT + (percent > 255 and 255 or percent))
+    -- Which dashboard drew last, for widget.background. Every dashboard on the radio runs its own
+    -- copy of this file, so the mark is kept on the Lua state's shared table, as a token rather
+    -- than the widget itself so that a dashboard removed from the screen is not kept alive by it.
+    local shared = _G.rfsuite
+    if type(shared) == "table" then
+      shared.dashboardHeartbeatOwner = self._shmToken
+    end
   end
 
   local now = nowSeconds()
@@ -354,6 +373,41 @@ end
 
 local EventsRuntime = requireModule("tasks/events/runtime.lua")
 
+-- A save started in the tool opened from this widget (widgets/dashboard/tool_host.lua) outlives
+-- the tool. Its messages are filed under the save's own client, which the tool's close leaves on
+-- the queue, so the replies keep advancing it on this widget's MSP tick: the writes, the EEPROM
+-- commit, the restart. The phases that wait on time instead -- the wait for a restarted flight
+-- controller to answer, the bound on the connect chain run after it, the short linger of a
+-- successful outcome -- advance only in SavePipeline.wakeup(), which the tool calls while it runs
+-- and which nothing called once it was closed. A restart under way when fullscreen was left then
+-- stayed in its probe phase, the connect chain was never run again for the restarted board, and
+-- the next open of the tool reported a board that had not come back.
+--
+-- The run is shared through the global table (tasks/msp/save_pipeline.lua), so the test is a read,
+-- and the module is loaded only when there is something to drive. While the tool is open this
+-- widget does not reach it: the tool runs in place of the widget's pass and drives the save itself.
+-- A second dashboard on another screen page still does, from its background pass, and that is
+-- harmless: every phase of wakeup() advances on a reply, a deadline or a one-time transition, so a
+-- call from a second instance soon after the tool's own finds nothing new to do.
+local SavePipeline = nil
+
+local function driveLeftSave()
+  local tasks = _G.rfsuite and _G.rfsuite.tasks
+  local shared = tasks and tasks.savePipeline
+  if type(shared) ~= "table" then return end
+  -- A successful outcome that clears itself is driven too: left standing, it would be drawn by the
+  -- tool's first build at its next open, before the tool's own wakeup could clear it.
+  if shared.run == nil and not (type(shared.outcome) == "table" and shared.outcome.clearAt) then
+    return
+  end
+  if not SavePipeline then
+    SavePipeline = requireModule("tasks/msp/save_pipeline.lua")
+  end
+  if type(SavePipeline) == "table" and type(SavePipeline.wakeup) == "function" then
+    pcall(SavePipeline.wakeup)
+  end
+end
+
 -- Both widgets run in one Lua state and share the one ring in it, so exactly one of them may
 -- write it out -- two writers would append to the same file from two places and interleave.
 -- widgets/service/runtime.lua is the better owner, because its background() runs while it is off
@@ -396,6 +450,10 @@ local function tickMspRuntime(self, carry)
 
   MspRuntime.tick()
   
+  -- Ahead of the event runner, so a connect chain it asks for again starts on this pass, and of
+  -- the pump below, so a probe it queues goes out on this pass too.
+  driveLeftSave()
+
   if EventsRuntime and type(EventsRuntime.wakeup) == "function" then
     pcall(EventsRuntime.wakeup, carry)
   end
@@ -699,6 +757,20 @@ end
 -- that is what replaces the code that raised.
 local JOB_FAULT_LIMIT = 3
 
+-- How long a held step control may keep back a rebuild of the surface it is on (the hold gate in
+-- the state pass), counted from the start of the hold. The rebuild waits because it would delete
+-- the button under the finger; but a release EdgeTX never reports would then keep it waiting for
+-- as long as the surface is up. Past this the rebuild runs, and lets go of the hold first, as
+-- every rebuild that is not held back does. The flight controller steps a held value every
+-- 200 ms after the first 100 ms (fc/rc_adjustments.c), so five seconds is 25 steps: at the
+-- largest step of every row but the head speed, 10, that is 250 units -- the whole range of most
+-- parameters, which run 0-250 or 0-255. A hold that long has crossed the range or lost its
+-- release. A hold with no rebuild waiting is not ended here: the drive ends every hold itself after
+-- the same five seconds (HOLD_LIMIT_SECONDS in widgets/dashboard/inflight/drive.lua). That limit
+-- counts from the press, this one from the first pass that sees the hold, so the drive's fires
+-- first and this cap stays as the second line; keep the two numbers equal.
+local HOLD_DEFER_SECONDS = 5
+
 local function jobCapped(self, kind)
   return (self._jobFaults[kind] or 0) >= JOB_FAULT_LIMIT
 end
@@ -729,6 +801,26 @@ end
 -- The zone view a free-form theme's scene build draws instead of the theme, or nil; defined with
 -- the theme views further down.
 local zoneViewFor
+
+-- A free-form theme's `build` must return a node list. One that returns anything else has drawn
+-- nothing and leaves `built` false, so the state pass would arm the same build again every other
+-- pass, with nothing logged. It raises instead, and is counted and given up like any other build
+-- that raises (see JOB_FAULT_LIMIT); the message names the theme.
+local function checkNodeList(self, children)
+  if type(children) ~= "table" then
+    error("theme build returned " .. type(children) .. ", not a node list: " .. tostring(self.themePath), 0)
+  end
+end
+
+-- The log lines of a job step that raised: the error itself, and on the raise that reaches
+-- JOB_FAULT_LIMIT the reason the screen now shows what it shows.
+local function logJobFault(self, jobKind, err, faults)
+  widgetLog(self, "job step error (" .. tostring(jobKind) .. "): " .. tostring(err), "error")
+  if faults == JOB_FAULT_LIMIT then
+    widgetLog(self, "job " .. tostring(jobKind) .. " raised " .. faults
+      .. " times in a row; not retried until the theme is reloaded", "error")
+  end
+end
 
 -- The scene job in three phases, carried as fields on the job table. The old LVGL tree
 -- stands until the swap, so a stepped rebuild shows the previous frame, never a blank one.
@@ -796,7 +888,7 @@ local function sceneJobStep(self)
     -- A free-form theme builds in one step, exactly as before -- the engine cannot chunk
     -- what it does not render.
     local children = self.theme.build(self.zone, self.state)
-    if type(children) ~= "table" then return true end
+    checkNodeList(self, children)
     lvgl.clear()
     lvgl.build(children)
     self.built = true
@@ -973,7 +1065,7 @@ local function fsThemeJobStep(self)
 
   if type(self.theme.build) == "function" then
     local children = self.theme.build(self.zone, self.state, viewCtx(self))
-    if type(children) ~= "table" then return true end
+    checkNodeList(self, children)
     if not bindsPress(children) then
       -- Onto a copy: the table is the theme's, and a theme that hands back one it keeps would
       -- otherwise carry the controls from then on -- into its zone tree as well.
@@ -1730,10 +1822,18 @@ local function updateConnectionState(self)
   -- script loads from colliding with the LVGL scene build and blowing the instruction budget.
   --
   -- `startupComplete` keeps the audio on exactly the condition it had before.
+  --
+  -- A board whose MSP API version was refused is never ready, the soft timeout included: the
+  -- splash stays up and says why, and the dashboard is not drawn for a board the suite does not
+  -- talk to.
+  local refused = type(runtimeState) == "table" and runtimeState.unsupportedApi == true
   local rawReady = connected and batteryReady and rfReady and modelPrefsResolved and tasksDone
+    and not refused
   local now = nowSeconds()
 
-  if connected and not rawReady then
+  -- Not counted while refused, so a refusal that is lifted (a fresh connect re-reads the version)
+  -- does not find a soft timeout already run out.
+  if connected and not rawReady and not refused then
     if not self.pendingSince then
       self.pendingSince = now
     end
@@ -1749,7 +1849,8 @@ local function updateConnectionState(self)
     self.readySince = nil
   end
 
-  local softTimeoutReady = connected and self.pendingSince ~= nil and (now - self.pendingSince) >= SPLASH_SOFT_TIMEOUT_SECONDS
+  local softTimeoutReady = connected and not refused and self.pendingSince ~= nil
+    and (now - self.pendingSince) >= SPLASH_SOFT_TIMEOUT_SECONDS
   -- The hold steadies a gate that flickers, and a flicker is a gate that has been open and has
   -- shut again. The FIRST time the conditions come true after the widget starts is not that:
   -- they have been false since boot and are now true. Spending the hold there costs a second of
@@ -1767,6 +1868,10 @@ local function updateConnectionState(self)
   if not connected then
     statusLine = (t and t("widgets.dashboard.waiting_for_msp_link")) or "Waiting for MSP link"
     self.batteryDialogState = "pending"
+  elseif refused then
+    local fmt = (t and t("widgets.dashboard.api_unsupported"))
+      or "MSP API %s not supported, needs Rotorflight 4.6+"
+    statusLine = string.format(fmt, tostring(runtimeState.refusedApiVersion or "?"))
   elseif not tasksDone then
     local pDone = 0
     local pTotal = 0
@@ -1824,12 +1929,24 @@ local function updateConnectionState(self)
       -- Nothing is announced here. The gate shuts on `connected`, i.e. on the RF link, and a lost
       -- link is the radio's own announcement; a flight controller that stops sending with the
       -- link up never shuts it, and lib/audio.lua hears that case from the telemetry frames.
+      --
+      -- The skipped-frame count goes with the connection, as the tool's does when its telemetry
+      -- stops being ready: after an armed flight the telemetry read stops while the link is down,
+      -- so the last count would otherwise stand until the next read. That read resumes on the
+      -- first pass the link is back, and the gate reopens no sooner than the ready hold after it,
+      -- so the dropouts alert already starts its window from a fresh reading; this keeps the
+      -- state from carrying the previous connection's count at all.
+      if self.state then self.state.skippedFrames = nil end
       if self.audioState and DashboardAudio and type(DashboardAudio.resetConnectionState) == "function" then
         DashboardAudio.resetConnectionState(self.audioState)
       elseif self.audioState then
         self.audioState.initialized = false
         self.audioState.modelAnnounced = false
       end
+      -- After an armed flight the telemetry read stops while the link is down, so the rescue
+      -- state would stand as last read and pass for this connection's first reading. Dropped
+      -- here, the first reading after the link returns is only recorded, as on the tool's path.
+      if self.state then self.state.rescue = nil end
     end
   end
 
@@ -1883,9 +2000,9 @@ local function normalizeCellVoltage(value, fallback)
   end
   -- Accept common storage encodings:
   -- volts (4.2), decivolts (42), centivolts (420), millivolts (4200).
-  if v > 1000 then
+  if v >= 1000 then
     v = v / 1000
-  elseif v > 100 then
+  elseif v >= 100 then
     v = v / 100
   elseif v > 10 then
     v = v / 10
@@ -1902,6 +2019,64 @@ end
 -- dashboard on any screen, and a dashboard reads it instead of being the only thing that has it.
 -- What is left here is the reading, below, plus the compatibility mapping at the end of this
 -- file for a user theme that still reaches for the old flat field names.
+
+-- The event history: what changed on the craft and when, newest last, for a theme that shows it
+-- (`state.eventLog`). Each entry is `{ kind, value, text, level, time }`:
+--
+--   kind    "armed", "disarmed", "connected", "disconnected", "governor" or "esc"
+--   value   the governor state index (rotorflight-firmware governor.h) for "governor", else nil
+--   text    the speed controller's own verdict for "esc", already in the package's language;
+--           nil for every other kind, which a theme names in its own words
+--   level   1 information, 2 warning, 3 error -- lib/esc_status.lua's levels, which "esc" carries
+--   time    the radio's clock as "HH:MM:SS", or "" on a radio that has none
+--
+-- Nothing here detects anything of its own. Each kind is noted where this file already acts on
+-- the transition: the arm edge in updateDerivedFlightState, the flight controller's connect and
+-- disconnect edges in the background work, and the governor and the speed controller after the
+-- telemetry read that brought them. So an entry costs a table and a clock read on the pass that
+-- has the transition, and a steady pass costs the two comparisons in noteReadingEvents.
+--
+-- The speed controller is the reading the theme already declared (`esc_status_live` in its
+-- sources, as the snapshot resolves it); a theme that does not declare it gets no "esc" entries,
+-- and nothing reads the two sensors for the history alone. The list is kept across connections:
+-- the disconnect is itself an entry, and the next connection's entries follow it.
+local EVENT_LOG_SIZE = 30
+
+local function eventClock()
+  if type(getDateTime) ~= "function" then return "" end
+  local ok, dt = pcall(getDateTime)
+  if not ok or type(dt) ~= "table" then return "" end
+  return string.format("%02d:%02d:%02d", dt.hour or 0, dt.min or 0, dt.sec or 0)
+end
+
+local function noteEvent(state, kind, level, value, text)
+  local log = state.eventLog
+  if type(log) ~= "table" then
+    log = {}
+    state.eventLog = log
+  end
+  log[#log + 1] = { kind = kind, value = value, text = text, level = level, time = eventClock() }
+  if #log > EVENT_LOG_SIZE then table.remove(log, 1) end
+end
+
+-- The two readings with no edge of their own elsewhere, on a pass that read them. A connection's
+-- first governor state is taken as the starting point and noted only once it moves; the speed
+-- controller's first verdict is noted, because it says which controller answered and how. A
+-- verdict the controller repeats is noted once, and a pass that resolved none (no link, nothing
+-- declared) leaves the last one standing.
+local function noteReadingEvents(state)
+  local governor = state.governor
+  if governor ~= state.eventGovernor then
+    if state.eventGovernor ~= nil then noteEvent(state, "governor", 1, governor) end
+    state.eventGovernor = governor
+  end
+  local derived = state.derived
+  local esc = derived and derived.esc_status_live
+  if type(esc) == "string" and esc ~= "" and esc ~= state.eventEsc then
+    state.eventEsc = esc
+    noteEvent(state, "esc", tonumber(derived.esc_status_live_level) or 1, nil, esc)
+  end
+end
 
 --- What this widget still keeps for itself across an arm edge, and the reading of what it does
 --- not. The statistics and the flight clock come from the record; the fields below are the
@@ -1927,9 +2102,11 @@ local function updateDerivedFlightState(state)
     -- BATTERY in the quick menu still brings the picker back.
     local pick = state.batteryPick
     if pick then pick.pending = false end
+    noteEvent(state, "armed", 1)
   elseif wasArmed and not isArmed then
     state.lastDisarmAt = nowSeconds()
     state.hadArmedFlight = true
+    noteEvent(state, "disarmed", 1)
     -- Capture the ending (landing) voltage as the last known live voltage, and the cell count
     -- readTelemetry took in the same pass, before it reached the arm flags.
     if type(state.voltage) == "number" and state.voltage > 0 then
@@ -2644,7 +2821,7 @@ local function readTelemetry(state, audioState)
   setField("lqSource", Sensors.active_paths and Sensors.active_paths.link)
   setField("profile", roundInt(getSensor("pid_profile") or state.profile, state.profile or 1))
   setField("rateProfile", roundInt(getSensor("rate_profile") or state.rateProfile, state.rateProfile or 1))
-  setField("batteryProfile", roundInt(getSensor("battery_profile") or state.batteryProfile, state.batteryProfile or 1))
+  setField("batteryProfile", roundInt(getSensor("battery_profile") or state.batteryProfile, state.batteryProfile))
   -- Read once for both fields that carry it -- `armFlags` here, which the announcements speak, and
   -- `armed` further down -- so a reading armFlagsRefused leaves untaken is untaken for both.
   local armState = getSensor("armflags")
@@ -2656,13 +2833,36 @@ local function readTelemetry(state, audioState)
     setField("armDisableFlags", math.max(0, math.floor(armDisableFlagsValue + 0.5)))
   end
   setField("governor", roundInt(getSensor("governor") or state.governor, state.governor or 0))
+  -- The rescue state (rotorflight-firmware flight/rescue.h, 0 = off), for lib/audio.lua. The
+  -- last reading, taken at most TELEMETRY_READ_SECONDS (0.5 s) ago because this runs only when
+  -- a read is due, and nil while nothing answers. Assigned rather than set through setField,
+  -- which never clears: the announcement speaks on a change between two readings, so neither a
+  -- value held over from the last connection nor a 0 standing in for a sensor not found yet
+  -- may pass for one. Nothing draws it, so it does not mark the telemetry as changed. Read only
+  -- while one of its announcements is on (`rescueWanted`, set by lib/audio.lua), so a radio that
+  -- never switches them on pays no sensor search for it.
+  if audioState and audioState.rescueWanted then
+    state.rescue = roundInt(getSensor("rescue"), nil)
+  else
+    state.rescue = nil
+  end
   -- The governor MODE, which is configuration rather than telemetry: the connect chain reads it
   -- once over MSP (tasks/events/common/governor_config.lua) and leaves it on the session. It is
   -- carried onto the state here so that an object needing it reads precomputed state, which is
   -- what the reactive sweep is allowed to do; reaching into the session from a render closure is
   -- not. Nil until the chain has answered, and a consumer has to cope with that.
+  --
+  -- Assigned even when nil, unlike every setField above, because the mode goes back to nil when a
+  -- new board's read starts and setField never clears: without this the previous board's mode
+  -- would stand for the rest of the session. The governor text objects and the urban theme decide
+  -- on this field ahead of the live value, so a stale mode has them say a governor state the model
+  -- is not in -- the same treatment the battery configuration gets below.
   local rfRoot = type(_G) == "table" and _G.rfsuite or nil
-  setField("governorMode", rfRoot and rfRoot.session and rfRoot.session.governorMode)
+  local governorMode = rfRoot and rfRoot.session and rfRoot.session.governorMode
+  if governorMode ~= state.governorMode then
+    state.governorMode = governorMode
+    telemetryChanged = true
+  end
   setField("mcuTemp", roundInt(getSensor("temp_mcu") or state.mcuTemp, state.mcuTemp or 0))
   setField("escTemp", roundInt(getSensor("temp_esc") or state.escTemp, state.escTemp or 0))
   setField("bec_voltage", getSensor("bec_voltage") or state.bec_voltage)
@@ -2732,22 +2932,47 @@ local function readTelemetry(state, audioState)
   if type(batteryCellCountValue) == "number" and batteryCellCountValue > 0 then
     setField("batteryCellCount", roundInt(batteryCellCountValue, state.batteryCellCount or 0))
   elseif type(voltageValue) == "number" and voltageValue > 0 then
-    -- Try to infer cell count from battery config's max cell voltage
     local session = type(_G) == "table" and _G.rfsuite and _G.rfsuite.session or nil
     local batteryConfig = session and (session.batteryConfig or session.battery_config) or nil
-    local maxCellVoltage = normalizeCellVoltage(batteryConfig and batteryConfig.vbatmaxcellvoltage, 4.2)
-
-    local inferredCells = math.max(1, math.floor((voltageValue / maxCellVoltage) + 0.5))
-    local existingCells = tonumber(state.batteryCellCount)
-    if not existingCells or existingCells <= 0 then
-      setField("batteryCellCount", inferredCells)
+    -- A cell count configured on the flight controller is the count it latches when it detects
+    -- the pack (rotorflight-firmware `batteryUpdatePresence`), so it is taken as it is rather than
+    -- guessed from the voltage: while the cell count sensor still reads 0 after a pack is plugged
+    -- in, and on a model that carries no such sensor. lib/audio.lua and the flight record read the
+    -- same field first for the same question. A count of 0 is the board detecting it itself.
+    local configuredCells = tonumber(batteryConfig and batteryConfig.batteryCellCount)
+    if configuredCells and configuredCells > 0 then
+      setField("batteryCellCount", roundInt(configuredCells, state.batteryCellCount or 0))
     else
-      local perCell = voltageValue / existingCells
-      -- Reconnect-safe: replace stale cell count if implied per-cell voltage is implausible.
-      if perCell < 2.5 or perCell > 4.5 then
-        setField("batteryCellCount", inferredCells)
+      -- Otherwise infer it from the battery config's max cell voltage. A voltage below half a
+      -- cell is not a 1S pack but no pack at all -- a meter with nothing on it, or a pack that is
+      -- gone -- so it never sets a count. A count already held is kept then: it is the count of
+      -- the pack that was there, which is still the best fact about the pack that is gone.
+      local maxCellVoltage = normalizeCellVoltage(batteryConfig and batteryConfig.vbatmaxcellvoltage, 4.2)
+
+      local inferredCells = math.floor((voltageValue / maxCellVoltage) + 0.5)
+      if inferredCells > 0 then
+        local existingCells = tonumber(state.batteryCellCount)
+        if not existingCells or existingCells <= 0 then
+          setField("batteryCellCount", inferredCells)
+        else
+          local perCell = voltageValue / existingCells
+          -- Reconnect-safe: replace stale cell count if implied per-cell voltage is implausible.
+          if perCell < 2.5 or perCell > 4.5 then
+            setField("batteryCellCount", inferredCells)
+          end
+        end
       end
     end
+  end
+
+  -- Whether the pack the model came up with was full: judged once per connection by lib/audio.lua's
+  -- *Pack Not Full* check, which takes it whether or not that announcement is switched on, and only
+  -- READ here, from the audio state that latches it, to publish it for a theme the way
+  -- `mainPowerLost` is published above. Not judged here: this read runs from the first pass of a
+  -- connection, while the voltage it has can still be the previous pack's. Nil until judged, so a theme
+  -- reading it with `== true` draws exactly what it drew before the verdict existed.
+  if DashboardAudio and type(DashboardAudio.packVerdict) == "function" then
+    state.packNotFull = DashboardAudio.packVerdict(audioState)
   end
 
   if type(armState) == "number" then
@@ -2769,6 +2994,55 @@ local function readTelemetry(state, audioState)
   setField("rss1", rss1)
   local rss2 = readFirstNumber(RSS2_SOURCES, state.rss2)
   setField("rss2", rss2)
+  -- The transmitter's power, which only lib/audio.lua's TX power alert uses: read only while that
+  -- alert is on (`txPowerWanted`, set by lib/audio.lua), so a radio that never switches it on pays
+  -- no sensor search for it; this pass's reading or nil, assigned rather than set through setField,
+  -- because nothing draws it. ui/home.lua reads it into the same field for the tool.
+  if audioState and audioState.txPowerWanted then
+    state.tpwr = getSensor("TPWR")
+  else
+    state.tpwr = nil
+  end
+
+  -- The readings only lib/audio.lua's link headroom and SNR alerts use, each read only while an
+  -- alert that needs it is on (flags set by lib/audio.lua): the air rate under either flag, the
+  -- antenna in use and the signal at the transmitter module under `linkHeadroomWanted`, the two
+  -- signal-to-noise ratios under `linkSnrWanted`. So a radio that never switches one on pays no
+  -- sensor search for them; this pass's reading or nil, assigned rather than set through setField,
+  -- because nothing draws them. ui/home.lua reads the same ones into the same fields for the tool.
+  local headroomWanted = audioState and audioState.linkHeadroomWanted
+  local snrWanted = audioState and audioState.linkSnrWanted
+  if headroomWanted or snrWanted then
+    state.rfMode = getSensor("RFMD")
+  else
+    state.rfMode = nil
+  end
+  if headroomWanted then
+    state.antenna = getSensor("ANT")
+    state.trss = getSensor("TRSS")
+  else
+    state.antenna = nil
+    state.trss = nil
+  end
+  if snrWanted then
+    state.rsnr = getSensor("RSNR")
+    state.tsnr = getSensor("TSNR")
+  else
+    state.rsnr = nil
+    state.tsnr = nil
+  end
+
+  -- The skipped-frame counter, for the telemetry dropouts alert in lib/audio.lua: the last
+  -- reading, taken at most TELEMETRY_READ_SECONDS (0.5 s) ago because this runs only when a read
+  -- is due, or nil while nothing answers. Assigned rather than set through setField, because
+  -- nothing draws it and a reading must not mark the telemetry as changed. Read only while that
+  -- alert is on (`dropoutsWanted`, set by lib/audio.lua), so a radio that never switches it on pays
+  -- no sensor search for it.
+  if audioState and audioState.dropoutsWanted then
+    state.skippedFrames = getSensor("skipped_frames")
+  else
+    state.skippedFrames = nil
+  end
 
   if telemetryChanged then updateDerivedFlightState(state) end
   readFlightRecord(state)
@@ -2931,9 +3205,12 @@ function Runtime.new(zone, options)
       rpm = 0,
       profile = 1,
       rateProfile = 1,
-      batteryProfile = 1,
+      batteryProfile = nil,
       armFlags = 0,
       armDisableFlags = 0,
+      -- The event history (noteEvent above): a table from here on, never nil, empty until the first
+      -- transition.
+      eventLog = {},
       -- The flight log's battery prompt. A table from here on, never nil: see
       -- newBatteryPickState above.
       batteryPick = newBatteryPickState(),
@@ -2971,6 +3248,9 @@ function Runtime.new(zone, options)
       -- published here so a theme can draw it. False rather than nil before the first read: a
       -- theme asking the question before any telemetry has arrived is not being told yes.
       mainPowerLost = false,
+      -- The pack plugged in was not full: true, false once judged full, nil until judged. Decided
+      -- once per connection in lib/audio.lua and published by readTelemetry.
+      packNotFull = nil,
       lastFlightEndingVoltage = nil,
       lastFlightEndingCells = nil,
       lastDisarmAt = nil,
@@ -3032,8 +3312,10 @@ function Runtime.new(zone, options)
 
     local voltage = tonumber(state and state.voltage)
     local maxCellVoltage = tonumber(batteryConfig and batteryConfig.vbatmaxcellvoltage) or 4.2
+    -- The same rule as readTelemetry's: a voltage below half a cell gives no count.
     if type(voltage) == "number" and voltage > 0 and maxCellVoltage > 0 then
-      return math.max(1, math.floor((voltage / maxCellVoltage) + 0.5))
+      local implied = math.floor((voltage / maxCellVoltage) + 0.5)
+      if implied > 0 then return implied end
     end
 
     return nil
@@ -3103,7 +3385,8 @@ function Runtime.new(zone, options)
 
     -- The steady-state pass allocates nothing. When the bounds in hand are already numeric,
     -- the four branches below that would end in a value-identical config -- custom bounds,
-    -- no cell count, plausible bounds kept, or a normalization that lands on the bounds
+    -- no cell count, plausible bounds kept for the count they were derived for, or a
+    -- normalization that lands on the bounds
     -- already held -- are decided here on the numbers alone, the existing table is kept, and
     -- only the (deduplicated, developer-gated) log line is still offered. Every path that can
     -- CHANGE a value falls through to the full copy below, so what the function computes is
@@ -3128,7 +3411,8 @@ function Runtime.new(zone, options)
         perCellMax < 3.0 or perCellMax > 5.2 or
         perCellMax <= perCellMin
       )
-      if (not isExactDefault) and (not looksInvalidForCells) then
+      local boundsCells = currentConfig._boundsCells
+      if (not isExactDefault) and (not looksInvalidForCells) and (boundsCells == nil or boundsCells == cells) then
         logVoltageThemeDecision(self, "keep", cells, currentConfig.v_min, currentConfig.v_max, curMin, curMax)
         return
       end
@@ -3136,8 +3420,11 @@ function Runtime.new(zone, options)
       -- gives 18.0/25.2 V, the pair isExactDefault reads as an unnormalized default, so without
       -- this every pass would copy the table only to write the same two numbers back. The raw
       -- values are compared, not curMin/curMax, so bounds held as strings still get converted.
+      -- The bounds in hand are then the ones derived for this count, and say so: a tag left at
+      -- another count would let them stand if the count ever moved back to it.
       local nextMin, nextMax = normalizedVoltageBounds(cells)
       if currentConfig.v_min == nextMin and currentConfig.v_max == nextMax then
+        if boundsCells ~= cells then currentConfig._boundsCells = cells end
         logVoltageThemeDecision(self, "normalize", cells, currentConfig.v_min, currentConfig.v_max, nextMin, nextMax)
         return
       end
@@ -3175,13 +3462,20 @@ function Runtime.new(zone, options)
       perCellMax < 3.0 or perCellMax > 5.2 or
       perCellMax <= perCellMin
     )
-    if (not isExactDefault) and (not looksInvalidForCells) then
+    -- Bounds this function derived carry the cell count they were derived for, and are derived
+    -- again when the count moves, however plausible they still look per cell: a count inferred
+    -- from a voltage that was still rising (11 for a 12S pack) gives bounds that pass the test
+    -- above for the real count too, and the real count arriving half a second later has to
+    -- replace them. Bounds with no count of their own are judged by that test alone, as before.
+    local boundsCells = currentConfig._boundsCells
+    if (not isExactDefault) and (not looksInvalidForCells) and (boundsCells == nil or boundsCells == cells) then
       applyThemeConfig(self, nextConfig)
       logVoltageThemeDecision(self, "keep", cells, currentConfig.v_min, currentConfig.v_max, nextConfig.v_min, nextConfig.v_max)
       return
     end
 
     nextConfig.v_min, nextConfig.v_max = normalizedVoltageBounds(cells)
+    nextConfig._boundsCells = cells
     applyThemeConfig(self, nextConfig)
     logVoltageThemeDecision(self, "normalize", cells, currentConfig.v_min, currentConfig.v_max, nextConfig.v_min, nextConfig.v_max)
   end
@@ -3390,6 +3684,9 @@ function Runtime.new(zone, options)
         if DerivedSnapshot and type(DerivedSnapshot.build) == "function" then
           DerivedSnapshot.build(self.state, self._snapshotSources or self.boxSources)
         end
+        -- Only once this connection's edge below has been taken, so its first entry is the
+        -- connection itself and not a reading taken on the pass that found it.
+        if self.lastFblConnected == true then noteReadingEvents(self.state) end
       end
     end
     
@@ -3401,9 +3698,8 @@ function Runtime.new(zone, options)
       if type(_G.rfsuite.session.dataflash) == "table" then
         self.state.dataflash = _G.rfsuite.session.dataflash
       end
-      if type(_G.rfsuite.session.battery_config) == "table" then
-        self.state.battery_config = _G.rfsuite.session.battery_config
-      end
+      -- Copied even when nil, so a cleared configuration does not survive on the dashboard.
+      self.state.battery_config = _G.rfsuite.session.battery_config
       if type(_G.rfsuite.session.modelPreferences) == "table" then
         self.modelPreferences = _G.rfsuite.session.modelPreferences
       end
@@ -3427,6 +3723,7 @@ function Runtime.new(zone, options)
     updateVoltageThemeConfig(self)
     if isFblConnected and not wasFblConnected then
       -- New FBL session detected: clear stale postflight state and rebuild theme/UI.
+      noteEvent(self.state, "connected", 1)
       self.state.hadArmedFlight = false
       self.state.hadInflightFlight = false
       self.state.prevArmed = false
@@ -3448,6 +3745,14 @@ function Runtime.new(zone, options)
       self.state.linkRfModeTick = nil
       self.state.linkGeneration = nil
       self.state.linkPingSent = nil
+      -- And the readings only the audio's link alerts take (readTelemetry), so the new session's
+      -- first pass judges its own link rather than the last one's.
+      self.state.tpwr = nil
+      self.state.rfMode = nil
+      self.state.antenna = nil
+      self.state.trss = nil
+      self.state.rsnr = nil
+      self.state.tsnr = nil
       -- The flight clock and the statistics are the record's; the event runtime drops them on
       -- the connect edge of its own link detector, which follows this one once the link has held
       -- for its CONNECT_STABLE_SECONDS -- not on the disconnect before it, which the post-flight
@@ -3495,6 +3800,11 @@ function Runtime.new(zone, options)
       end
       widgetLog(self, "FBL reconnect edge: reset dashboard session state", "info")
     elseif not isFblConnected and wasFblConnected then
+      -- The event history's two memos go with the connection: the next one starts its governor
+      -- from its own first reading and notes its speed controller's first verdict again.
+      noteEvent(self.state, "disconnected", 2)
+      self.state.eventGovernor = nil
+      self.state.eventEsc = nil
       -- The session latches are cleared here rather than on the connect edge, and the difference
       -- is not stylistic. updateConnectionState() runs at the top of this pass, so a clear placed
       -- on the connect edge is first READ by the next pass -- the opening pass of a new session,
@@ -3507,6 +3817,7 @@ function Runtime.new(zone, options)
       self.state.batteryTelemetrySeen = false
       self.state.rfTelemetrySeen = false
       self.state.fuelTelemetrySeen = false
+      self.state.packNotFull = nil
       self.state.previousSessionFuel = self.state.fuel
       self.state.fuel = 0
       if Sensors and type(Sensors.reset) == "function" then
@@ -3740,39 +4051,48 @@ function Runtime.new(zone, options)
       -- job is armed by a request that it clears before it can raise, and each new request arms it
       -- again: it is logged in full every time, as before.
       local counted = self._job.oneShot ~= true
+      -- Which surface the tree on screen is, for the hold gate in the state pass: forgotten before
+      -- any build step runs, since a step may clear the tree and then raise, and recorded only
+      -- once a build has completed. A one-shot job builds nothing and leaves the record alone.
+      if counted then self._treeKind, self._treeKey = nil, nil end
       local stepOk, stepDone = pcall(self._job.step, self)
       if not stepOk then
         self._job   = nil
         self.built  = false
-        -- The entry point owns the CPU-limit response: the hold-off, and the release of the two
-        -- variables the overlay may be holding. It cannot do either if the raise stops here.
         local isCpuLimit = (LogSink and type(LogSink.isCpuLimitError) == "function" and LogSink.isCpuLimitError(stepDone))
           or (type(stepDone) == "string" and string.find(stepDone, "CPU limit", 1, true) ~= nil)
-        if isCpuLimit then
-          error(stepDone, 0)
-        end
-        -- Any other raise counts against its kind; see JOB_FAULT_LIMIT. Only the first of a run
-        -- goes to the card as a fault -- the ones after it are the same fault, and a fault line is
-        -- written to the card as it happens -- and the raise that reaches the limit says so, so
-        -- the log ends with the reason the screen shows what it shows.
+        -- Every raise counts against its kind, a step stopped at the instruction limit included;
+        -- see JOB_FAULT_LIMIT. A build that always overruns is otherwise armed again after every
+        -- back-off for as long as the widget runs. Counting here is safe after such a stop: the
+        -- firmware raises the limit once per call and runs the rest of the call unmetered.
         local faults = 1
         if counted then
           faults = (self._jobFaults[jobKind] or 0) + 1
           self._jobFaults[jobKind] = faults
         end
-        if faults == 1 and LogSink and type(LogSink.fault) == "function" then
+        -- Only the first of a run goes to the card as a fault -- the ones after it are the same
+        -- fault, and a fault line is written to the card as it happens; a stop at the limit is
+        -- written there by the entry point -- and the raise that reaches the limit says so, so
+        -- the log ends with the reason the screen shows what it shows.
+        if faults == 1 and not isCpuLimit and LogSink and type(LogSink.fault) == "function" then
           pcall(LogSink.fault, "dashboard.job." .. tostring(jobKind), stepDone)
         end
-        widgetLog(self, "job step error (" .. tostring(jobKind) .. "): " .. tostring(stepDone), "error")
-        if faults == JOB_FAULT_LIMIT then
-          widgetLog(self, "job " .. tostring(jobKind) .. " raised " .. faults
-            .. " times in a row; not retried until the theme is reloaded", "error")
+        -- Under pcall: a log line that fails (out of memory) must not replace a CPU-limit stop on
+        -- its way to the entry point below.
+        pcall(logJobFault, self, jobKind, stepDone, faults)
+        -- The entry point owns the CPU-limit response: the hold-off, and the release of the two
+        -- variables the overlay may be holding. It cannot do either if the raise stops here.
+        if isCpuLimit then
+          error(stepDone, 0)
         end
       elseif stepDone then
         -- step returned true: job is done. A run of raises ends when the surface is drawn, not
         -- when a step merely returns: several steps finish without building anything, and the
         -- state pass then arms them again.
-        if self.built then self._jobFaults[jobKind] = nil end
+        if self.built then
+          self._jobFaults[jobKind] = nil
+          if counted then self._treeKind, self._treeKey = jobKind, self.renderKey end
+        end
         self._job = nil
       end
       -- The second of the two clock reads the gap line is built from; see traceInstructionUsage.
@@ -3842,6 +4162,7 @@ function Runtime.new(zone, options)
     -- so a hole measured while the tuning surface was up can be told from one on the dashboard.
     self._passWork = tuningMode or "state"
     local nextRenderKey = nil
+    local holding, heldFor = false, 0
     if tuningMode then
       -- The same 2 Hz throttle the scene key is under. The values and the armed row are reactive
       -- closures and follow the state per frame; everything the key covers is layout, and
@@ -3859,9 +4180,17 @@ function Runtime.new(zone, options)
       -- (widgets/dashboard/inflight/drive.lua, the AdjF block in fastTick). When the hold ends the
       -- next recompute happens as it always did.
       local snapshot = self.state.inflight
-      local holding = (type(snapshot) == "table") and snapshot.holding == true
+      holding = (type(snapshot) == "table") and snapshot.holding == true
       if not self._lastUIRefresh then self._lastUIRefresh = 0 end
       local now = nowSeconds()
+      -- When the hold began, for the cap on the hold gate below (HOLD_DEFER_SECONDS).
+      if not holding then
+        self._holdSince = nil
+      elseif self._holdSince == nil then
+        self._holdSince = now
+      else
+        heldFor = now - self._holdSince
+      end
       -- A tap on a bank chip or a row asks for the new selection to be on screen at once rather
       -- than up to half a second later; it sets this flag instead of dropping the key itself, so
       -- that it goes through the hold gate like everything else.
@@ -3962,6 +4291,20 @@ function Runtime.new(zone, options)
       -- lands in the next one, which carries nothing else.
     end
 
+    -- The hold rule above keeps the tuning key still, but `built` and the render key are cleared
+    -- from elsewhere as well: a theme reload (the latch into flight loads the in-flight module, a
+    -- changed preference), the voltage bounds moving, new widget options. Each would rebuild the
+    -- tuning surface under the finger, and the rebuild lets go of the hold first (tuningJobStep),
+    -- so the held step ended with the finger still down. While a control is held and the tree on
+    -- screen is the one this pass would build -- same job, same key -- that rebuild waits: `built`
+    -- stays false and the first pass after the release builds it. A build of another surface --
+    -- the zone's, once fullscreen has been left -- is a different job and is not held back. A hold
+    -- older than HOLD_DEFER_SECONDS holds nothing back: the rebuild runs and lets go of it.
+    if holding and heldFor < HOLD_DEFER_SECONDS
+        and jobKind == self._treeKind and nextRenderKey == self._treeKey then
+      jobKind = nil
+    end
+
     if not self.built and jobKind ~= nil then
       -- The failure surface at full screen carries what the connect splash carries there, since
       -- it is drawn by the same builder: see failedJobStep.
@@ -3989,6 +4332,30 @@ function Runtime.new(zone, options)
     -- Off screen. The overlay's own tick refuses to drive from here and cleans up instead, which
     -- is what makes a widget scrolled away stop writing the two variables.
     self._foreground = false
+
+    -- Still running, so still passing: the heartbeat, as traceInstructionUsage publishes it at
+    -- the top of refresh. A dashboard on a screen page the radio does not start on is called
+    -- here before its first refresh, so the gate may not have been sampled yet. The usage figure
+    -- is the last one refresh sampled: getUsage() answers an LVGL widget the share of its last
+    -- pass that DREW in either entry point (luaGetUsage, radio/src/lua/api_general.cpp), so a
+    -- background pass has no figure of its own to give.
+    --
+    -- Only the dashboard that drew last publishes here, or the one built last until one draws. A
+    -- second dashboard on another screen page would otherwise keep the counter moving after the one
+    -- on screen had been stopped by the instruction limit, and the stop would never be recorded.
+    if self._shmOn == nil then
+      self._shmOn = Log and type(Log.wanted) == "function" and Log.wanted("debug") or false
+    end
+    self._shmPass = (self._shmPass or 0) + 1
+    if self._shmPass >= SHM_PASS_WRAP then self._shmPass = 1 end
+    local shared = _G.rfsuite
+    local owner = type(shared) == "table" and shared.dashboardHeartbeatOwner or nil
+    if self._shmOn and type(setShmVar) == "function"
+      and (owner == nil or owner == self._shmToken) then
+      local usage = self._usageLast or 0
+      setShmVar(SHM_PASS_ID, self._shmPass * SHM_PASS_SHIFT + (usage > 255 and 255 or usage))
+    end
+
     -- An open tool cannot paint from here and its closing sequence needs the screen, so it is
     -- dropped at once and the dashboard's own background work takes over again.
     if self._toolHost ~= nil then
@@ -3999,6 +4366,9 @@ function Runtime.new(zone, options)
     performBackgroundWork(self, true)
     return 0
   end
+
+  -- This dashboard's heartbeat mark for widget.background; claimed at the end of this function.
+  widget._shmToken = {}
 
   -- The battery prompt's handle for anything that is not this widget: a theme, another widget,
   -- the tool. It records a REQUEST exactly as a press in the picker
@@ -4050,6 +4420,18 @@ function Runtime.new(zone, options)
   end
 
   reloadActiveTheme(widget)
+
+  -- The heartbeat mark for widget.background, claimed by the instance built last. A dashboard
+  -- built again in place -- its screen's layout changed, or the widget set again in its zone --
+  -- is built while a menu page covers it and draws nothing until that closes; the mark of the
+  -- instance it replaced would keep it from publishing meanwhile, and the background decoder,
+  -- which has seen the counter move, would record it as stopped. The one on screen takes the mark
+  -- back on its next pass. Taken last here, so that a build that fails on the way leaves the
+  -- mark where it was.
+  if type(_G) == "table" then
+    _G.rfsuite = _G.rfsuite or {}
+    _G.rfsuite.dashboardHeartbeatOwner = widget._shmToken
+  end
   return widget
 end
 

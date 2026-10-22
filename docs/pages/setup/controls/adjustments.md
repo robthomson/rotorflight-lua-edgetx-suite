@@ -26,7 +26,7 @@ stand now (`-` while its enable channel is outside its range; a `*` marks an out
 | --- | --- |
 | Range | The slot being edited, 1 to 42. A slot that has a function shows its name beside the number. |
 | Type | *OFF*: the slot does nothing. *MAPPED*: the value channel's position sets the value directly. *STEPPED*: two windows of the value channel step the value down and up. |
-| Enable Channel | The AUX channel that switches the slot on, *Always* for a slot that is always on, or *AUTO*: move the switch you want and the page takes the AUX channel that moved. The live position of the channel is shown beside it. *Set* takes the channel's current position, 50 µs either side, as the enable range, after asking. |
+| Enable Channel | The AUX channel that switches the slot on, *Always* for a slot that is always on, or *AUTO*: move the switch you want and the page takes the AUX channel that moved. The live position of the channel is shown beside it: AUX 1 to AUX 3 are the radio channels the flight controller's channel map gives them, AUX 4 and above are radio channels 9 and up. *Set* takes the channel's current position, 50 µs either side, as the enable range, after asking. |
 | Enable Range | The window, in µs, inside which the enable channel switches the slot on. 875 to 2125 µs, in steps of 5 µs. |
 | Value Channel | *MAPPED* and *STEPPED* only. The AUX channel that carries the value, or *AUTO* as above, with its live position. |
 | Step Size | *STEPPED* only. How far one step moves the value, 0 to 255. |
@@ -40,11 +40,14 @@ stand now (`-` while its enable channel is outside its range; a `*` marks an out
 - On a flight controller with MSP API 12.09 or later the page reads the function of every
   slot in one reply and the selected slot's own settings, and reads another slot when it is
   selected. An older firmware is read in one read of the whole table.
-- Save writes each changed slot, then one EEPROM write.
+- Save writes each changed slot, then one EEPROM write. While it does, the page is covered by the
+  save's progress, and Save or Reload pressed in the header has no effect until the save has finished.
+- Reload discards every unsaved change, on every slot: a slot changed before Reload is not
+  written by the next Save, and is read from the flight controller again when it is selected.
 - The function names are shown in the radio's language.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/)
+- [Rotorflight documentation](https://doc.rotorflight.org/)
 
 *Documented against RFSuite 0.1.7.*

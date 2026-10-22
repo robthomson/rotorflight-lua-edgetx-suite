@@ -67,27 +67,33 @@ end
 
 -- Which pack this flight belongs to.
 --
--- A pick made in the session wins, and everything else comes from the model's own store. The
--- store is re-read here rather than taken from the copy the session is carrying, because the
--- page that writes it runs as a tool while this runs as a widget, and the copy this side holds
--- was loaded when the craft connected. Reading it at the disarm edge costs nothing that the
--- line about to be appended does not cost anyway, and it is the same answer the arm edge would
--- have given: the page is locked while the craft is armed, so the choice cannot have moved
--- since take-off.
+-- The model's own store answers first, re-read here rather than taken from the copy the session
+-- is carrying. A pick is recorded in two places (lib/battery_pick.lua, select): the session of the
+-- Lua state it was made in, and the store. The dashboard's prompt runs in this state and the
+-- standalone tool's page in another, so a pick made on the page after one made in the prompt
+-- reaches the store and never this session -- the store is the one place that holds the later of
+-- the two. Reading it at the disarm edge costs nothing that the line about to be appended does
+-- not cost anyway, and it is the same answer the arm edge would have given: the page is locked
+-- while the craft is armed, so the choice cannot have moved since take-off.
+--
+-- A store that has recorded a choice answers for it, "no battery" included. The session's pick
+-- is the answer only where the store has none: no board id to name it by, or no choice recorded
+-- in it. A pick whose store write the card refused (select logs it) loses to the older choice the
+-- store still holds.
 local function resolveBattery(FlightLog, session, record)
-  if type(record.batteryId) == "string" and record.batteryId ~= "" then
-    return record.batteryId
-  end
-
   if session.mcu_id ~= nil then
     local ModelPreferences = loadModule("lib/model_preferences.lua")
     if type(ModelPreferences) == "table" and type(ModelPreferences.loadByMcuId) == "function" then
       local ok, store = pcall(ModelPreferences.loadByMcuId, session.mcu_id, true)
-      if ok then
-        local id = FlightLog.storedBatteryId(store)
-        if id ~= nil then return id end
+      local section = ok and type(store) == "table" and store.flightlog or nil
+      if type(section) == "table" and section.battery ~= nil then
+        return FlightLog.storedBatteryId(store)
       end
     end
+  end
+
+  if type(record.batteryId) == "string" and record.batteryId ~= "" then
+    return record.batteryId
   end
 
   return FlightLog.storedBatteryId(session.modelPreferences)
@@ -211,6 +217,13 @@ function M.wakeup()
   end
 
   local batteryId = resolveBattery(FlightLog, session, record)
+  -- A link that dropped in flight -- for a second, long before the runtime holds it to be lost --
+  -- leaves no board identity until the MSP runtime reads it again after this disarm, and so no
+  -- store and no in-memory copy of it to ask. The pack the store held at the arm edge is then the
+  -- answer: the choice cannot move while the craft is armed.
+  if batteryId == nil and session.mcu_id == nil and type(record.batteryAtArm) == "string" then
+    batteryId = record.batteryAtArm
+  end
 
   local ok, written, reason = pcall(FlightLog.appendFlight, record.startDate, record.model or "",
     batteryId or "", seconds, flightStats(session))

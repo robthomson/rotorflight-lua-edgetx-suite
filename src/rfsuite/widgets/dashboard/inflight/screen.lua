@@ -685,13 +685,17 @@ local function appendActive(children, widget, m, t, p)
   -- rounds is "sometimes no step at all", and the cause his card log points at is a tap inside the
   -- cool-down: the flight controller cannot tell two steps that close apart, so the drive refuses
   -- the second -- correctly, silently, and indistinguishably from a control that is not wired up.
+  -- The same line says when the drive has let go of a hold on its own (HOLD_LIMIT_SECONDS in
+  -- drive.lua), which otherwise looks like a board that stopped answering.
   -- Read through the clock like the banner, so no rebuild puts it up and none takes it down.
   local hintW = m.rowX - m.leftX - m.pad
   local refusalText = {
     cooling = fitText(t("widgets.dashboard.inflight_too_fast", "too fast - one step at a time"), hintW, m.small),
     unread = fitText(t("widgets.dashboard.inflight_custom_unread", "Custom layout not read"), hintW, m.small),
     range = fitText(t("widgets.dashboard.inflight_custom_range", "Row cannot be stepped"), hintW, m.small),
-    empty = fitText(t("widgets.dashboard.inflight_custom_empty", "No usable Custom rows"), hintW, m.small)
+    empty = fitText(t("widgets.dashboard.inflight_custom_empty", "No usable Custom rows"), hintW, m.small),
+    hold_limit = pickText(t("widgets.dashboard.inflight_hold_limit", "hold ended after 5 s - press again"),
+                          t("widgets.dashboard.inflight_hold_limit_short", "5 s over - press again"), hintW, m.small)
   }
   children[#children + 1] = {
     type = "label", x = m.leftX, y = m.sideY + m.lineH * 2, w = hintW, align = LEFT, font = m.small,

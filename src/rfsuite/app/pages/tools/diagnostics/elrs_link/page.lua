@@ -200,6 +200,25 @@ local function formatElrsSummary(i18n)
     return "rate=" .. tostring(rateText) .. ", ratio=" .. tostring(ratioText)
 end
 
+-- The module's Max Power and whether dynamic power is on, as the probe read them. Read only: the
+-- TX power alert under Settings > Audio > Events > Link measures against them. A part the module
+-- did not give -- a Max Power label that is not a plain number, a module without the fields -- is "?".
+local function formatTxPower(i18n)
+    local session = getSession()
+    local linkConfig = session and session.elrsLinkConfig
+    if type(linkConfig) ~= "table" then
+        return pageText(i18n, "status_not_probed", "Not probed yet")
+    end
+    local maxText = linkConfig.maxPowerMilliwatts and (tostring(linkConfig.maxPowerMilliwatts) .. " mW") or "?"
+    local dynamicText = "?"
+    if linkConfig.dynamicPower == true then
+        dynamicText = pageText(i18n, "power_dynamic", "dynamic")
+    elseif linkConfig.dynamicPower == false then
+        dynamicText = pageText(i18n, "power_fixed", "fixed")
+    end
+    return maxText .. ", " .. dynamicText
+end
+
 local function actionModeLabel(i18n, mode)
     if mode == ElrsTask.MODE_ROTORFLIGHT_TO_ELRS then
         return pageText(i18n, "action_rf_to_elrs", "RF -> ELRS")
@@ -271,9 +290,9 @@ local function startSync(i18n, mode)
   -- Not while the craft is armed. The entry is locked against being ENTERED while armed, but a
   -- page opened before the arming edge stays open across it and its buttons stay live, so the
   -- press has to ask the question the menu asked earlier. The header's Save refuses on the same
-  -- predicate; this is the same refusal, one button over.
+  -- predicate; this is the same refusal, one button over. The Status row says why for as long as
+  -- the craft is armed (rebuildRows), so nothing is left standing once it is disarmed.
   if armedRefusesTheWrite() then
-    state.notice = pageText(i18n, "status_unavailable_armed", "Unavailable while armed")
     rebuild()
     return
   end
@@ -289,7 +308,6 @@ local function startSync(i18n, mode)
         -- The question stands over an arbitrary number of ticks and the craft can be armed
         -- under it, so the state is read again here rather than inherited from the press.
         if armedRefusesTheWrite() then
-          state.notice = pageText(i18n, "status_unavailable_armed", "Unavailable while armed")
           rebuild()
           return
         end
@@ -318,19 +336,30 @@ end
 local function rebuildRows(i18n)
   if not ElrsTask then return false end
   
-  local statusKey, statusDef = ElrsTask.getStatus()
-  local status = pageText(i18n, statusKey, statusDef)
+  local status = ElrsTask.getStatusText(i18n or state.i18n)
   local isRunning = ElrsTask.isRunning()
   -- A declined or unanswerable confirmation leaves the task untouched, so its own status still
   -- reads as the probe that ran before it. The notice is what tells the pilot nothing was
   -- written. It stands only while nothing is running, so a task that starts for any reason
   -- takes the row back rather than reporting underneath a stale line.
   if state.notice and not isRunning then status = state.notice end
+  -- While the craft is armed the tool runs none of this page's work -- the host does not wake a
+  -- page then -- so the row says that instead of whatever the task last reported. It is read
+  -- from the predicate on every build rather than kept, because a kept refusal outlives the
+  -- arming it was about: the host rebuilds the page on both edges.
+  -- Where the predicate itself is missing, every button refuses as well, and the row names that
+  -- rather than an arming nobody saw.
+  if type(Armed) ~= "table" or type(Armed.isArmed) ~= "function" then
+    status = pageText(i18n, "status_arming_unknown", "Arming state unknown")
+  elseif Armed.isArmed() == true then
+    status = pageText(i18n, "status_unavailable_armed", "Unavailable while armed")
+  end
 
   local rows = {
     { label = pageText(i18n, "status", "Status"), value = status },
     { label = pageText(i18n, "rotorflight", "Rotorflight"), value = formatRotorflightSummary(i18n) },
     { label = pageText(i18n, "elrs_module", "ELRS Module"), value = formatElrsSummary(i18n) },
+    { label = pageText(i18n, "tx_power", "TX Power"), value = formatTxPower(i18n) },
     { label = pageText(i18n, "action", "Action"), value = actionModeLabel(i18n, ElrsTask.getMode()) },
   }
 
@@ -401,7 +430,14 @@ function M.build(ctx)
     return
   end
   local rowY = y + 6
+  -- The rows share the body with the buttons below them (15 above, 40 tall), and a row takes 44
+  -- where there is room for it. Five rows of 44 would push the buttons past the bottom of a
+  -- 480x320 screen's body, where four fitted, so a row gives up height before the buttons leave
+  -- the screen; 30 is still a row of small text with its rule below it.
   local rowH = 44
+  if type(ctx.h) == "number" and #state.rows > 0 then
+    rowH = math.max(30, math.min(44, math.floor((ctx.h - 6 - 15 - 40 - 4) / #state.rows)))
+  end
   local labelW = math.floor(w * 0.35)
   local valueX = x + labelW
   local valueW = w - labelW
@@ -463,6 +499,12 @@ function M.build(ctx)
       textColor = WHITE,
       active = buttonsEnabled,
       press = function()
+        -- A probe only reads, but started while armed it would stand still until the disarm
+        -- (the host does not wake the page) and grey out all three buttons meanwhile.
+        if armedRefusesTheWrite() then
+          if type(state.requestRebuild) == "function" then state.requestRebuild() end
+          return
+        end
         state.notice = nil
         requestTelemetryConfig(true)
         ElrsTask.start(ElrsTask.MODE_PROBE)

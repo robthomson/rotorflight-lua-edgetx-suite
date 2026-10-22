@@ -180,6 +180,7 @@ function M.newDrive(radio, settings)
   self.coolUntil = 0
   self.holdRow = nil
   self.holdUp = nil
+  self.holdSince = nil
   self.trimRow = nil
   self.trimUp = nil
   self.trimCode = nil
@@ -295,12 +296,31 @@ end
 local REFUSAL_TICKS = 80
 
 --- Publish a step refusal through the snapshot; button callbacks do not consume return reasons.
-function Drive:refuseStep(reason, now)
+-- `ticks` overrides how long it stands, for a notice that has more to say than a refused tap.
+function Drive:refuseStep(reason, now, ticks)
   if reason == "range" and self.setSource == "unread" then reason = "unread" end
   if reason == "range" and self.setSource == "unavailable" then reason = "empty" end
   self.stepRefusedReason = reason
-  self.stepRefusedUntil = now + REFUSAL_TICKS
+  self.stepRefusedUntil = now + (ticks or REFUSAL_TICKS)
 end
+
+-- How long a step control may be held before the drive lets go of it on its own, counted from the
+-- press. The hold ends at the button's release handler, which EdgeTX raises on LV_EVENT_RELEASED
+-- and on nothing else (MomentaryButton in radio/src/gui/colorlcd/libui/button.cpp); LVGL can
+-- forget a pressed object without that event -- lv_indev_wait_release() turns the release into
+-- LV_EVENT_PRESS_LOST, lv_indev_reset() sends it nowhere -- and EdgeTX's touch read calls both,
+-- under a backlight that is off and under a "Disable Touch" special function. Neither event
+-- reaches a Lua script, so a lost release cannot be seen from here, only outlived. The flight
+-- controller steps a held value every 200 ms after the first 100 ms (fc/rc_adjustments.c), so
+-- five seconds is 25 steps -- the same bound, for the same reason, as the dashboard's limit on
+-- how long a held step keeps a rebuild waiting (HOLD_DEFER_SECONDS in widgets/dashboard/runtime.lua).
+-- A pilot who wants more presses again.
+local HOLD_LIMIT_SECONDS = 5
+local HOLD_LIMIT_TICKS = HOLD_LIMIT_SECONDS * 100
+
+-- How long the notice that the limit ended a hold stands: the finger may still be on the button,
+-- and the pilot has to be able to read why the steps stopped.
+local HOLD_LIMIT_NOTICE_TICKS = 300
 
 function Drive:pulseTicks()
   local ms = tonumber(self.settings and self.settings.pulse_ms) or M.DEFAULTS.pulse_ms
@@ -507,6 +527,7 @@ function Drive:press(row, up)
   self.pulseUntil = now + self:pulseTicks()
   self.holdRow = row or self.row
   self.holdUp = up
+  self.holdSince = now
   self:writeValue(code, self.radio.flightMode())
   return true
 end
@@ -516,6 +537,7 @@ end
 function Drive:release()
   self.holdRow = nil
   self.holdUp = nil
+  self.holdSince = nil
 end
 
 --- One tap, for a radio whose LVGL build has no momentary button: press without the hold, so the
@@ -549,6 +571,7 @@ function Drive:cleanup(force, keepBank)
   self.pulseUntil = nil
   self.holdRow = nil
   self.holdUp = nil
+  self.holdSince = nil
   self.trimRow = nil
   self.trimUp = nil
   self.trimCode = nil
@@ -1159,6 +1182,15 @@ function Drive:fastTick(now)
     self.trimPulseUntil = nil
     self.trimCode = nil
     self.trimCoolUntil = now + self:pulseTicks()
+  end
+  -- A hold that has outlived HOLD_LIMIT_SECONDS is let go here, whether or not its release was
+  -- ever reported, and the magnitude falls away below on the same pass. A release that does arrive
+  -- afterwards finds nothing held and changes nothing.
+  -- A hold with no start recorded is treated as an old one: only press() sets both.
+  if self.holdRow ~= nil and (self.holdSince == nil or now - self.holdSince >= HOLD_LIMIT_TICKS) then
+    logDrive("hold on row %s ended after %d s without a release", tostring(self.holdRow), HOLD_LIMIT_SECONDS)
+    self:release()
+    self:refuseStep("hold_limit", now, HOLD_LIMIT_NOTICE_TICKS)
   end
 
   local want = 0

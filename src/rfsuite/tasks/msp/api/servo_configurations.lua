@@ -43,10 +43,15 @@ local function read_u16_le(buf, pos)
   return lo + hi * 256
 end
 
+local SERVO_RECORD_BYTES = 16
+
 function Api.parse(buf)
   if type(buf) ~= "table" then return nil end
   local pos = 1
   local servoCount = tonumber(buf[pos]) or 0
+  -- A reply shorter than its own servo count is refused rather than read as zeros: the servo
+  -- pages write a record back as it was parsed, and a zero-filled one is mid 0, min 0, max 0.
+  if #buf < 1 + servoCount * SERVO_RECORD_BYTES then return nil end
   pos = pos + 1
   local parsed = { servo_count = servoCount, servos = {} }
   for i = 1, servoCount do

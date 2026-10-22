@@ -102,6 +102,13 @@ local function pageText(i18n, key, fallback)
   return fallback
 end
 
+local function logMsg(msg, level)
+  local Log = loadModule("lib/log.lua")
+  if Log and type(Log.emit) == "function" then
+    Log.emit("rfsuite.flrtr", msg, level or "debug")
+  end
+end
+
 local function queueFlyrotorReadActual(queue)
   queue:add({
     command = EscParametersFlyrotorApi.command,
@@ -204,9 +211,17 @@ end
 -- `invalid_payload_length` cannot fire against today's field spec (the builder walks the same
 -- spec and always returns `payloadLength` bytes), but it is the guard for the next edit of the
 -- spec, so it maps to a key as well instead of leaking a code token into the dialog.
+--
+-- Each entry is a labelKey/labelFallback pair because the packager translates that pair in
+-- place: the fallback an installed suite carries is then already in the pilot's language. A
+-- key that only reaches the lookup at the call is never translated, and the notice would ship
+-- in English in every language.
 local MESSAGE_KEYS = {
-  esc_not_read = { "save_error_not_read", "Read the ESC before saving." },
-  invalid_payload_length = { "save_error_invalid_payload", "ESC data could not be built. Re-read the ESC before saving." }
+  esc_not_read = { labelKey = "save_error_not_read", labelFallback = "Read the ESC before saving." },
+  invalid_payload_length = {
+    labelKey = "save_error_invalid_payload",
+    labelFallback = "ESC data could not be built. Re-read the ESC before saving."
+  }
 }
 
 local function queueFlyrotorWrite(requestRebuild)
@@ -349,6 +364,9 @@ end
 
 function M.getHeaderActions()
   return {
+    -- Declared rather than left to the header's help registry: that registry is created by the
+    -- first `?` press of a session, so before it a page that only ships a help.lua shows `?` greyed.
+    help = true,
     save = true,
     reload = true,
     menu = true
@@ -359,13 +377,14 @@ function M.onSave(ctx)
   local ok, err = queueFlyrotorWrite(ctx and ctx.requestRebuild)
   if not ok then
     if ctx and type(ctx.reportSave) == "function" then
+      local i18n = ctx.i18n
       local mapped = MESSAGE_KEYS[err]
       local message = tostring(err or "MSP write failed")
       if mapped then
-        message = pageText(ctx and ctx.i18n, mapped[1], mapped[2])
+        message = pageText(i18n, mapped.labelKey, mapped.labelFallback)
       end
       ctx.reportSave({
-        title = pageText(ctx and ctx.i18n, "save_error_title", "Error"),
+        title = pageText(i18n, "save_error_title", "Error"),
         message = message
       })
     end
@@ -378,6 +397,13 @@ function M.onReload(ctx)
   ui.dirty = false
   queueFlyrotorRead(false)
   return true
+end
+
+-- The sheet names the rows of the section on screen, so it is told which section that is.
+function M.onHelp(ctx)
+  local help = loadModule("app/pages/setup/esc_motors/esc_tools/escmfg/flrtr/help.lua")
+  if type(help) ~= "function" then return nil end
+  return help({ i18n = ctx and ctx.i18n, section = ui.currentSection })
 end
 
 function M.build(ctx)
@@ -415,7 +441,7 @@ function M.build(ctx)
   end
 
   if ui.loading or ui.saving then
-    local titleText = ui.loading and pageText(i18n, "loading", "Loading") or pageText(i18n, "saving", "Saving")
+    local titleText = ui.loading and pageText(i18n, "loading_title", "Loading") or pageText(i18n, "saving_title", "Saving")
     local msgText = ui.loading and pageText(i18n, "loading_data", "Loading ESC parameters...") or pageText(i18n, "saving_data", "Saving ESC parameters...")
     if LoadingOverlay and type(LoadingOverlay.append) == "function" then
       LoadingOverlay.append(children, {
@@ -707,6 +733,11 @@ function M.onClose()
   ConfirmDialog = nil
   FlrtrInit = nil
   t = nil
+end
+
+-- Asked before the page is left (ui/home.lua): true while an edit here is not saved.
+function M.hasUnsavedChanges()
+  return ui.dirty == true
 end
 
 return M

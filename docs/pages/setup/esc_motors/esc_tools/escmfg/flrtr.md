@@ -22,7 +22,8 @@ the model is armed.
 
 The page opens on a safety notice, and behind it on a summary of the ESC's model, firmware
 and version. *Section* switches between three groups of settings; every setting of the
-chosen group is always shown.
+chosen group is always shown. The `?` in the header explains the rows of the group on screen,
+one line each.
 
 | Setting | What it does |
 | --- | --- |
@@ -32,33 +33,33 @@ chosen group is always shown.
 
 | Setting | What it does |
 | --- | --- |
-| Cell Count | The battery's cell count as the ESC assumes it, 4 to 14. |
-| Low Voltage Protection | The voltage the low-voltage protection acts on, 2.8V to 3.8V in 0.1 V steps. |
-| Temperature Protection | The temperature the protection acts on, 50 C to 135 C in five-degree steps. |
-| BEC Voltage | The BEC output: *Disabled*, *7.5V*, *8.0V*, *8.5V* or *12.0V*. |
-| Electrical Angle | *Auto*, or a fixed 1 deg to 10 deg in one-degree steps. |
-| Motor Direction | *CW* or *CCW*. |
-| Starting Torque | 1 to 15. |
-| Response Speed | 1 to 15. |
-| Buzzer Volume | 1 to 5. |
-| Current Gain | A correction applied to the ESC's current figure, -20 to 20 in steps of 1. |
-| Fan Control | *Automatic*, *Always On* or *Always Off*. |
+| Cell Count | The cell count of the flight pack as the ESC assumes it, 4 to 14. |
+| Low Voltage Protection | The cell voltage the low-voltage protection acts at, 2.8V to 3.8V in 0.1 V steps. |
+| Temperature Protection | The ESC temperature the protection acts at, 50 C to 135 C in five-degree steps. |
+| BEC Voltage | The output voltage of the ESC's BEC: *Disabled*, *7.5V*, *8.0V*, *8.5V* or *12.0V*. |
+| Electrical Angle | *Auto*, or a fixed 1 deg to 10 deg in one-degree steps. *Auto* adjusts the angle to the motor's speed and the ESC's temperature and is the recommended setting; a fixed angle can give a smoother run or suit a non-standard motor. If the motor runs hot, raise it. |
+| Motor Direction | Which way the motor turns: *CW* or *CCW*. |
+| Starting Torque | 1 to 15. Lower it if the tail kicks as the motor spools up. |
+| Response Speed | How directly the ESC follows the throttle, 1 to 15. |
+| Buzzer Volume | How loud the ESC beeps, 1 to 5. |
+| Current Gain | A correction applied to the ESC's current reading, -20 to 20 in steps of 1. |
+| Fan Control | *Automatic* runs the cooling fan by temperature; *Always On* or *Always Off*. |
 
 ### Advanced
 
 | Setting | What it does |
 | --- | --- |
-| Auto Restart Time | 0 s to 100 s in one-second steps. |
-| Restart Acc | 1 to 10. |
+| Auto Restart Time | How long after a throttle cut the ESC still restarts the motor quickly (bailout), 0 s to 100 s in one-second steps. |
+| Restart Acc | How fast the motor spools back up on such a restart, 1 to 10. |
 
 ### Governor
 
 | Setting | What it does |
 | --- | --- |
-| ESC Mode | Which governor runs the head speed: *ESC Gov*, *Linear Throttle* or *RF Gov*. |
-| Soft Start | 5 s to 55 s in one-second steps. |
-| Governor P | The ESC governor's P gain, 0 to 100. |
-| Governor I | The ESC governor's I gain, 0 to 100. |
+| ESC Mode | Which governor runs the head speed: *ESC Gov*, *Linear Throttle* or *RF Gov*. *RF Gov* is the choice when Rotorflight's governor holds the head speed; *ESC Gov* uses the ESC's own governor. |
+| Soft Start | The time the ESC takes to spool the motor up, 5 s to 55 s in one-second steps. |
+| Governor P | The ESC governor's P gain, 0 to 100. It acts only with *ESC Mode* on *ESC Gov*. |
+| Governor I | The ESC governor's I gain, 0 to 100. It acts only with *ESC Mode* on *ESC Gov*. |
 
 ## Notes
 
@@ -72,11 +73,18 @@ chosen group is always shown.
 - An unsaved edit is marked below the list, and is lost if the page is left without saving.
 - If the ESC does not answer the write, the page says so and the edits stay marked as
   unsaved.
+- A reply that is not a Flyrotor parameter block -- shorter than the 56-byte block, or
+  carrying another ESC family's signature -- is refused. The values on screen stay as they were
+  (on a fresh visit, the page's own initial ones), Save is refused until a read succeeds, and the refusal is listed as a warning on the
+  *Session Logs* page.
 
 ## Related
 
-- [Rotorflight documentation](https://www.rotorflight.org/docs/) -- what each of these
+- [Rotorflight documentation](https://doc.rotorflight.org/) -- what each of these
   settings does inside the ESC, and how the ESC's own governor relates to the flight
   controller's.
+- [Flyrotor Governor setup](https://doc.rotorflight.org/setup/governor-setup/#flyrotor)
+  -- Rotorflight's own page on this ESC: wiring, the electrical angle, the starting torque and
+  which ESC mode goes with which governor.
 
 *Documented against RFSuite 0.1.7.*
