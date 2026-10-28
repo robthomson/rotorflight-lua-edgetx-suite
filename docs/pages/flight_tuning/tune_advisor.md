@@ -6,11 +6,11 @@ sidebar_position: 30
 
 # Tune Advisor
 
-While you fly in rate mode, the flight controller measures how the heli answers the sticks. This page reads
+While you fly in acro mode, the flight controller measures how the heli answers the sticks. This page reads
 those measurements and suggests one change at a time for each axis. *Save* in the header lists the writable
 changes for the shown axis and asks you to confirm. Fly again after applying them and come back.
 
-The flight controller counts only rate flight while spooled up and airborne, with the heli moving on some axis.
+The flight controller counts only acro flight while spooled up and airborne, with the heli moving on some axis.
 Time in Angle, Horizon, Trainer, Altitude hold, Rescue, GPS rescue or failsafe is left out. The data builds up
 over several flights. Clear it with *\** after confirming, or it clears at the next arming when the PIDs, the
 I-term relax cut-off, the PID mode, the rates (type, RC rate, expo, S-rate), the PID profile or the rate profile
@@ -34,7 +34,7 @@ Reload asks again. When the link drops for a moment, the last measurements stay 
 | --- | --- |
 | #n (heading at the top) | The rate profile the advice is for. A profile switch with the page open is followed shortly after the radio sees the new profile. |
 | Axis | Roll, Pitch or Yaw. Everything below is for the chosen axis. |
-| Flight data | Minutes and seconds of rate flight measured, and whether measuring is happening now (collecting) or not (paused). |
+| Flight data | Minutes and seconds of acro flight measured, and whether measuring is happening now (collecting) or not (paused). |
 | Response | How fast the heli turns compared with the rate the stick asks for, for example "53% faster than asked". "Needs more flying" shows how much data is still needed; "Too uneven to judge" means the response varies too much. |
 | Stops | How much the heli bounces back after you centre the stick, as a share of the turn rate. Needs 10 stops. |
 | Suggested changes | Up to three changes, each named by the page, row and column to change, in the units that page shows, for example *PIDs > Roll > FF: 100 -> 80* and *Rates > Roll > Max Rate: 720 -> 900*. |

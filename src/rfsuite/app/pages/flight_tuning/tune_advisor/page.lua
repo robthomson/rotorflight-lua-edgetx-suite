@@ -252,14 +252,14 @@ local function loadTexts(i18n)
     stopsMoreFmt = pageText(i18n, "stops_more_fmt", "Needs more stops (%d/%d)"),
     stopsValueFmt = pageText(i18n, "stops_value_fmt", "%d%% bounce-back"),
 
-    actFlyRoll = pageText(i18n, "act_fly_roll", "Fly rolls in rate mode, centre the stick after each"),
-    actFlyPitch = pageText(i18n, "act_fly_pitch", "Fly flips in rate mode, centre the stick after each"),
-    actFlyYaw = pageText(i18n, "act_fly_yaw", "Fly pirouettes in rate mode, centre the stick after each"),
+    actFlyRoll = pageText(i18n, "act_fly_roll", "Fly rolls in acro mode, centre the stick after each"),
+    actFlyPitch = pageText(i18n, "act_fly_pitch", "Fly flips in acro mode, centre the stick after each"),
+    actFlyYaw = pageText(i18n, "act_fly_yaw", "Fly pirouettes in acro mode, centre the stick after each"),
     actRatePctUpFmt = pageText(i18n, "act_rate_pct_up_fmt", "%s > %s: all rates about %d%% higher"),
     actRatePctDownFmt = pageText(i18n, "act_rate_pct_down_fmt", "%s > %s: all rates about %d%% lower"),
     actNone = pageText(i18n, "act_none", "No change suggested"),
 
-    whyMore = pageText(i18n, "why_more", "Data builds up while you fly in rate mode."),
+    whyMore = pageText(i18n, "why_more", "Data builds up while you fly in acro mode."),
     whyUneven = pageText(i18n, "why_uneven", "The response varies too much to judge. Common in 3D."),
     whyFast = pageText(i18n, "why_fast", "The heli turns faster than the stick asks for."),
     whySlow = pageText(i18n, "why_slow", "The heli turns slower than the stick asks for."),

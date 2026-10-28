@@ -515,13 +515,13 @@ return {
         resp_ok = "Matches the stick",
         stops_more_fmt = "Needs more stops (%d/%d)",
         stops_value_fmt = "%d%% bounce-back",
-        act_fly_roll = "Fly rolls in rate mode, centre the stick after each",
-        act_fly_pitch = "Fly flips in rate mode, centre the stick after each",
-        act_fly_yaw = "Fly pirouettes in rate mode, centre the stick after each",
+        act_fly_roll = "Fly rolls in acro mode, centre the stick after each",
+        act_fly_pitch = "Fly flips in acro mode, centre the stick after each",
+        act_fly_yaw = "Fly pirouettes in acro mode, centre the stick after each",
         act_rate_pct_up_fmt = "%s > %s: all rates about %d%% higher",
         act_rate_pct_down_fmt = "%s > %s: all rates about %d%% lower",
         act_none = "No change suggested",
-        why_more = "Data builds up while you fly in rate mode.",
+        why_more = "Data builds up while you fly in acro mode.",
         why_uneven = "The response varies too much to judge. Common in 3D.",
         why_fast = "The heli turns faster than the stick asks for.",
         why_slow = "The heli turns slower than the stick asks for.",
@@ -554,7 +554,7 @@ return {
         journal_failed = "The change journal could not be written.",
         applied = "Applied. Fly again to check the new settings.",
         help_title = "Tune Advisor",
-        help_message = "Fly in rate mode; read each axis, apply once, then fly again.\n#n (heading): the rate profile the advice is for.\nAxis: Roll, Pitch or Yaw; all lines are for this axis.\nFlight data: rate flight measured and whether collecting now.\nResponse: heli turn rate compared with the stick.\nStops: bounce-back after centring the stick.\nSuggested changes: what to change, by page and setting.\nWhy: reason for each change.\n*: clears collected data after asking.\nSave (header): writes suggested changes for this axis after you confirm."
+        help_message = "Fly in acro mode; read each axis, apply once, then fly again.\n#n (heading): the rate profile the advice is for.\nAxis: Roll, Pitch or Yaw; all lines are for this axis.\nFlight data: acro flight measured and whether collecting now.\nResponse: heli turn rate compared with the stick.\nStops: bounce-back after centring the stick.\nSuggested changes: what to change, by page and setting.\nWhy: reason for each change.\n*: clears collected data after asking.\nSave (header): writes suggested changes for this axis after you confirm."
       },
       flight_tuning_rates_advanced_cyclic_behaviour = {
         save_error_title = "Error",
