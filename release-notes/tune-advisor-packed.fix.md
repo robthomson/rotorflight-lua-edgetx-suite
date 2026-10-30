@@ -1,0 +1,2 @@
+- **The Tune Advisor reads current firmware's statistics again (`tasks/msp/api/tune_advisor.lua`)**:
+  - The page reads the packed 52-byte reply (payload version 3, one CRSF frame and 12 S.Port frames) instead of showing *Needs newer firmware*. It had refused every firmware since the shake fields were added.
