@@ -47,7 +47,8 @@ local FRACTION_SCALE = 100   -- fullRatio, meanRebound, meanCounter: U8, 0..2.55
 local RATE_STEP = 10         -- fullMaxRate: U8 in steps of 10 deg/s
 local SHAKE_SCALE = 4        -- shakeRms: U8, 0..63.75 deg/s
 
-Api.REPLY_BYTES = REPLY_BYTES
+-- The longest reply parse reads (the only one, while version 3 is the only layout)
+Api.MAX_REPLY_BYTES = REPLY_BYTES
 
 local function u8(buf, i)
   return tonumber(buf[i]) or 0
@@ -162,7 +163,7 @@ function Api.simulatorResponseFor(axis)
   local function wU8(v, scale) w8(scaled(v, scale, 0, 255)) end
 
   w8(PAYLOAD_VERSION); w8((axis - 1) | (RATES_TYPE_ACTUAL << 3)); w16(147)
-  w32(a.p | (a.f << 10)); w8(a.cutoff); w8(a.rcRate); w8(a.sRate)
+  w32(a.p | (a.f << 10) | (((a.b or 0) & 0x3FF) << 20)); w8(a.cutoff); w8(a.rcRate); w8(a.sRate)
   w16(a.ffCount); wU8(a.ff, GAIN_SCALE); w8(scaled(a.corr, CORR_SCALE, -128, 127)); w8(a.lag)
   for i = 1, BAND_COUNT do wU8(a.sp[i][1], GAIN_SCALE); w16(a.sp[i][2]) end
   for i = 1, BAND_COUNT do wU8(a.coll[i][1], GAIN_SCALE); w16(a.coll[i][2]) end
