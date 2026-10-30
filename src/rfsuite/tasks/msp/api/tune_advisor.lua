@@ -2,7 +2,7 @@
 --
 -- The flight controller's in-flight rate-loop statistics, one axis per request. The request
 -- payload is U8 axis (0 roll, 1 pitch, 2 yaw); the clear command takes no payload. The reply is
--- 52 bytes: one CRSF frame, 12 S.Port frames. Layout, payload version 3, as serialised by the
+-- 51 bytes: one CRSF frame, 12 S.Port frames. Layout, payload version 3, as serialised by the
 -- firmware's MSP2_GET_TUNE_ADVISOR case in src/main/msp/msp.c:
 --
 --   U8 version, U8 flags (bits 0-1 axis, bit 2 collecting, bits 3-5 rates_type),
@@ -12,12 +12,12 @@
 --   3 x {U8 gain x64, U16 count}  by setpoint 40-100, 100-200, 200+ deg/s
 --   3 x {U8 gain x64, U16 count}  by |collective| <25%, 25-50%, 50%+
 --   U16 fullCount, U16 fullSatCount, U8 fullRatio x100, U8 fullMaxRate in 10 deg/s
---   U16 releases, U16 bigRebounds, U8 meanRebound x100, U8 meanOvershoot x64,
+--   U16 releases, U8 bigRebounds, U8 meanRebound x100, U8 meanOvershoot x64,
 --   U8 meanCounter x100, S16 meanIterm x1000
 --   U16 shakeCount, U8 shakeRms x4 (deg/s)
 --
 -- Scaled values are decoded to plain numbers here; the firmware saturates each at its byte's
--- range, and counts stop at 65535.
+-- range (bigRebounds too), and counts stop at 65535.
 --
 -- A flight controller without the command answers with an MSP error. Over telemetry that
 -- reply carries a single byte, so a reply shorter than the record is the refusal, and parse
@@ -36,7 +36,7 @@ local Api = {
 }
 
 local PAYLOAD_VERSION = 3
-local REPLY_BYTES = 52
+local REPLY_BYTES = 51
 local BAND_COUNT = 3
 local RATES_TYPE_ACTUAL = 4
 
@@ -114,13 +114,13 @@ function Api.parse(buf)
       fullRatio = u8(buf, 39) / FRACTION_SCALE,
       fullMaxRate = u8(buf, 40) * RATE_STEP,
       releases = u16(buf, 41),
-      bigRebounds = u16(buf, 43),
-      meanRebound = u8(buf, 45) / FRACTION_SCALE,
-      meanOvershoot = u8(buf, 46) / GAIN_SCALE,
-      meanCounter = u8(buf, 47) / FRACTION_SCALE,
-      meanIterm = s16(buf, 48) / 1000,
-      shakeCount = u16(buf, 50),
-      shakeRms = u8(buf, 52) / SHAKE_SCALE,
+      bigRebounds = u8(buf, 43),
+      meanRebound = u8(buf, 44) / FRACTION_SCALE,
+      meanOvershoot = u8(buf, 45) / GAIN_SCALE,
+      meanCounter = u8(buf, 46) / FRACTION_SCALE,
+      meanIterm = s16(buf, 47) / 1000,
+      shakeCount = u16(buf, 49),
+      shakeRms = u8(buf, 51) / SHAKE_SCALE,
     }
   }
 end
@@ -167,7 +167,7 @@ function Api.simulatorResponseFor(axis)
   for i = 1, BAND_COUNT do wU8(a.sp[i][1], GAIN_SCALE); w16(a.sp[i][2]) end
   for i = 1, BAND_COUNT do wU8(a.coll[i][1], GAIN_SCALE); w16(a.coll[i][2]) end
   w16(a.full[1]); w16(a.full[2]); wU8(a.full[3], FRACTION_SCALE); wU8(a.full[4], 1 / RATE_STEP)
-  w16(a.rel[1]); w16(a.rel[2])
+  w16(a.rel[1]); w8(math.min(a.rel[2], 255))
   wU8(a.rel[3], FRACTION_SCALE); wU8(a.rel[4], GAIN_SCALE); wU8(a.rel[5], FRACTION_SCALE)
   w16(scaled(a.rel[6], 1000, -32768, 32767) & 0xFFFF)
   w16(a.shake[1]); wU8(a.shake[2], SHAKE_SCALE)
